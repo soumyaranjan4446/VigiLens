@@ -115,7 +115,7 @@ VigiLens/
 Python 3.10+ is recommended. A CUDA GPU is optional but strongly recommended for precomputation and online training; cached fusion/LSTM training runs comfortably on CPU for small datasets.
 
 ```bash
-git clone https://github.com/Gauranga025/VigiLens.git
+git clone https://github.com/soumyaranjan4446/VigiLens.git
 cd VigiLens
 
 python -m venv .venv
