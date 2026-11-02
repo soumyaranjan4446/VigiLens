@@ -337,6 +337,12 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
+    if not Path(args.checkpoint).exists():
+        raise SystemExit(
+            f"ERROR: Checkpoint file '{args.checkpoint}' not found!\n"
+            "Please run Step 5 (python -m training.train) to train the model before running evaluation."
+        )
+
     from models.anomaly_model import VigiLensModel
 
     model = VigiLensModel(device=args.device, load_extractors=False)

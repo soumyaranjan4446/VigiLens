@@ -168,6 +168,12 @@ def main() -> None:
 
     from models.anomaly_model import VigiLensModel
 
+    if not Path(args.checkpoint).exists():
+        raise SystemExit(
+            f"ERROR: Checkpoint file '{args.checkpoint}' not found!\n"
+            "Please run Step 5 (python -m training.train) to train the model before running calibration."
+        )
+
     caches = discover_caches(args.cache_dir)
     if not caches:
         raise SystemExit(f"No .pt caches found in {args.cache_dir}")

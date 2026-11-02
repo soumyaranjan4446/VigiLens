@@ -292,6 +292,13 @@ class VigiLensModel(nn.Module):
 
     def load_checkpoint(self, path: str, strict: bool = True) -> Dict:
         """Load a checkpoint. Falls back to weights_only=False for old files."""
+        chk_path = Path(path)
+        if not chk_path.exists():
+            raise FileNotFoundError(
+                f"Checkpoint file not found at '{path}'. "
+                "Please run the training step (Step 5: 'python -m training.train') first "
+                "to train the model and generate 'checkpoints/best_model.pth'."
+            )
         try:
             checkpoint = torch.load(
                 path, map_location=self.device, weights_only=True
