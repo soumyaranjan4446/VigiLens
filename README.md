@@ -163,6 +163,26 @@ On Colab, omit `--no-segmentation` to exercise the real YOLO path. The synthetic
 
 All training videos must contain **normal behavior only**. RGB and IR files are paired by sequence ID: `scene001_rgb.mp4` pairs with `scene001_ir.mp4` (extensions may differ). Files are discovered recursively under `Data/<split>/rgb` and `Data/<split>/ir`.
 
+### VidLLVIP (Recommended Real-Data Pedestrian Corpus)
+
+[VidLLVIP](https://github.com/jianfeng0369/VidLLVIP) provides 894 spatially registered, temporally aligned 5-second Visible (VI) + Infrared (IR) video pairs (1280x1024, 25 FPS) derived from the LLVIP pedestrian surveillance dataset. It is hosted openly on Hugging Face.
+
+```bash
+# Download and extract dataset.zip (6.18 GB)
+wget -c -O dataset.zip "https://huggingface.co/datasets/jianfeng0369/VidLLVIP/resolve/main/dataset/dataset.zip"
+unzip -q -o dataset.zip -d VidLLVIP
+
+# Prepare paired videos into Data/train and Data/val
+python scripts/prepare_vidllvip.py --input VidLLVIP --output Data --val-scenes 12,13,14 --eval-manifest Evaluation/manifest_vidllvip.json
+```
+
+Useful options:
+- `--val-scenes 12,13,14`: Reserves scenes 12-14 for validation (zero frame leakage across scenes).
+- `--val-ratio 0.2`: Held-out fraction when `--val-scenes` is omitted.
+- `--max-clips 100`: Fast preview limit for quick Colab runs (~5-10 minutes on T4 GPU). Omit to use all 894 clips.
+- `--all-train`: Put all clips into training.
+- `--eval-manifest Evaluation/manifest_vidllvip.json`: Generates an evaluation manifest for the held-out validation set.
+
 ### OTCBVS Dataset 10 (smoke / preview)
 
 OTCBVS contains short visible/thermal sequences and is useful as a first real-data check. The preparation script tolerates video pairs, paired image directories, and common visible/thermal naming conventions.
