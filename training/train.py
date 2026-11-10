@@ -510,7 +510,7 @@ def build_cached_datasets(cache_dir: Union[str, Path],
                           sequence_stride: int = 1,
                           rgb_dropout_prob: float = 0.15,
                           ir_dropout_prob: float = 0.15,
-                          max_cached_videos: int = 4) -> Tuple[CachedFeatureDataset, CachedFeatureDataset]:
+                          max_cached_videos: Optional[int] = 1024) -> Tuple[CachedFeatureDataset, CachedFeatureDataset]:
     cache_dir = Path(cache_dir)
     train_dir = Path(train_cache) if train_cache else (cache_dir / "train" if (cache_dir / "train").exists() else cache_dir)
     val_dir = Path(val_cache) if val_cache else (cache_dir / "val" if (cache_dir / "val").exists() else cache_dir)
@@ -635,6 +635,12 @@ def main() -> None:
     parser.add_argument("--seq-len", type=int, default=16)
     parser.add_argument("--seq-stride", type=int, default=1)
     parser.add_argument("--workers", type=int, default=0)
+    parser.add_argument(
+        "--max-cached-videos",
+        type=int,
+        default=1024,
+        help="Number of .pt feature caches kept in RAM during training (0 = unlimited)",
+    )
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--amp", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--resume", default=None)
@@ -715,6 +721,7 @@ def main() -> None:
             sequence_length=args.seq_len, sequence_stride=args.seq_stride,
             rgb_dropout_prob=config.training.rgb_dropout_prob,
             ir_dropout_prob=config.training.ir_dropout_prob,
+            max_cached_videos=args.max_cached_videos,
         )
         result = train_cached(
             model, train_dataset, val_dataset, args.device,
@@ -730,6 +737,11 @@ def main() -> None:
 
     if args.calibrate and not args.online:
         from training.calibration import AnomalyCalibrator
+
+        best_ckpt = result.get("best_checkpoint")
+        if best_ckpt and Path(best_ckpt).exists():
+            model.load_checkpoint(best_ckpt)
+            model.to(args.device)
 
         caches = discover_caches(args.val_cache or (Path(args.cache_dir) / "val"))
         if caches:

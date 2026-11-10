@@ -119,3 +119,49 @@ def test_prepare_vidllvip_from_zip(tmp_path):
     assert counts["val"] == 0
     assert (out_dir / "train" / "rgb" / "01_0000_0005_rgb.mp4").exists()
     assert (out_dir / "train" / "ir" / "01_0000_0005_ir.mp4").exists()
+
+
+def test_prepare_vidllvip_three_way_scene_split(tmp_path):
+    src_dir = tmp_path / "dataset"
+    vi_dir = src_dir / "dataset" / "vi"
+    ir_dir = src_dir / "dataset" / "ir"
+
+    for scene in ["01", "02", "03", "04", "05"]:
+        for interval in ["0000_0005", "0005_0010"]:
+            name = f"{scene}_{interval}.mp4"
+            _make_dummy_mp4(vi_dir / name)
+            _make_dummy_mp4(ir_dir / name)
+
+    out_dir = tmp_path / "Data_3way"
+    manifest_path = tmp_path / "manifest.json"
+    counts = prepare_vidllvip(
+        input_path=src_dir,
+        output_dir=out_dir,
+        val_ratio=0.2,
+        test_ratio=0.2,
+        copy_files=True,
+        eval_manifest=manifest_path,
+        seed=42,
+    )
+
+    assert counts["train"] == 6
+    assert counts["val"] == 2
+    assert counts["test"] == 2
+    assert (out_dir / "test" / "rgb").exists()
+    assert (out_dir / "test" / "ir").exists()
+
+    with open(manifest_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    assert data["name"] == "vidllvip_test"
+    assert len(data["videos"]) == 2
+    assert all("/test/" in item["rgb"] for item in data["videos"])
+
+    # Disjointness check across train/val/test scenes.
+    split_scenes = {}
+    for split in ("train", "val", "test"):
+        split_scenes[split] = {
+            p.stem.split("_")[0] for p in (out_dir / split / "rgb").glob("*.mp4")
+        }
+    assert split_scenes["train"].isdisjoint(split_scenes["val"])
+    assert split_scenes["train"].isdisjoint(split_scenes["test"])
+    assert split_scenes["val"].isdisjoint(split_scenes["test"])

@@ -161,7 +161,8 @@ def evaluate_manifest(model,
                       smoothing_window: int = 1,
                       chunk_size: int = 256,
                       device: Optional[Union[str, torch.device]] = None,
-                      write_csv: bool = True) -> Dict[str, Any]:
+                      write_csv: bool = True,
+                      modality: str = "auto") -> Dict[str, Any]:
     """Score a manifest and write per-frame scores plus a JSON summary."""
     manifest_path = Path(manifest_path)
     base_dir = manifest_path.parent
@@ -212,6 +213,7 @@ def evaluate_manifest(model,
             smoothing_window=smoothing_window,
             chunk_size=chunk_size,
             device=device,
+            modality=modality,
         )
         labels = labels_for_entry(
             entry, result["num_frames"], base_dir, result.get("labels")
@@ -265,6 +267,7 @@ def evaluate_manifest(model,
     summary = {
         "manifest": str(manifest_path),
         "cache_dir": str(cache_root) if cache_root is not None else None,
+        "modality": modality,
         "num_videos": len(per_video),
         "num_frames": int(labels.size),
         "score_type": score_type,
@@ -304,20 +307,23 @@ def _print_summary(summary: Dict[str, Any]) -> None:
     metrics = summary["metrics"]
     print("\nVigiLens evaluation")
     print("=" * 60)
-    print(f"Videos: {summary['num_videos']}  Frames: {summary['num_frames']}")
+    print(f"Videos: {summary['num_videos']}  Frames: {summary['num_frames']}  Modality: {summary.get('modality', 'auto')}")
     print(f"Score type: {summary['score_type']}  Threshold: {summary['threshold']:.6f}")
     print(f"AUC: {metrics['auc']:.4f}" if np.isfinite(metrics["auc"]) else "AUC: n/a (single class)")
     print(f"AP:  {metrics['ap']:.4f}" if np.isfinite(metrics["ap"]) else "AP:  n/a (single class)")
     print(
         f"Precision: {metrics['precision']:.4f}  Recall: {metrics['recall']:.4f}  "
-        f"F1: {metrics['f1']:.4f}"
+        f"F1: {metrics['f1']:.4f}  Accuracy: {metrics['accuracy']:.4f}"
     )
     print(
-        f"FPR: {metrics['fpr']:.4f}  FPR@95TPR: {metrics['fpr_at_95tpr']:.4f}"
+        f"FPR: {metrics['fpr']:.4f}  Specificity: {1.0 - metrics['fpr']:.4f}  "
+        f"FPR@95TPR: {metrics['fpr_at_95tpr']:.4f}"
         if np.isfinite(metrics["fpr_at_95tpr"])
-        else f"FPR: {metrics['fpr']:.4f}  FPR@95TPR: n/a"
+        else f"FPR: {metrics['fpr']:.4f}  Specificity: {1.0 - metrics['fpr']:.4f}  FPR@95TPR: n/a"
     )
-    print(f"Best-F1 threshold: {summary['metrics_at_best_f1_threshold']['best_f1_threshold']:.6f}")
+    print(f"TN: {metrics['tn']}  FP: {metrics['fp']}  TP: {metrics['tp']}  FN: {metrics['fn']}")
+    if np.isfinite(summary["metrics_at_best_f1_threshold"]["best_f1_threshold"]):
+        print(f"Best-F1 threshold: {summary['metrics_at_best_f1_threshold']['best_f1_threshold']:.6f}")
     print("=" * 60)
 
 
@@ -330,6 +336,7 @@ def main() -> None:
     parser.add_argument("--threshold", type=float, default=None)
     parser.add_argument("--smoothing-window", type=int, default=1)
     parser.add_argument("--chunk-size", type=int, default=256)
+    parser.add_argument("--modality", default="auto", choices=["auto", "rgb+ir", "rgb", "ir"])
     parser.add_argument("--output-dir", default="Evaluation/results")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--no-csv", action="store_true")
@@ -360,6 +367,7 @@ def main() -> None:
         chunk_size=args.chunk_size,
         device=args.device,
         write_csv=not args.no_csv,
+        modality=args.modality,
     )
     _print_summary(summary)
 

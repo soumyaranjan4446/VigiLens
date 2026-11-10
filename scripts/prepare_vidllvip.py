@@ -145,6 +145,26 @@ def discover_vidllvip_pairs(vi_dir: Path, ir_dir: Path) -> List[Tuple[Path, Path
     return pairs
 
 
+def _scene_tokens(scenes: Sequence[str]) -> set:
+    """Normalize user-specified scene IDs (matching '1', '01', etc.)."""
+    tokens = set()
+    for raw in scenes:
+        token = raw.strip()
+        if not token:
+            continue
+        tokens.add(token)
+        if token.isdigit():
+            tokens.add(token.zfill(2))
+            tokens.add(token.lstrip("0") or "0")
+    return tokens
+
+
+def _matches_scene(scene_id: str, token_set: set) -> bool:
+    stripped = scene_id.lstrip("0") or "0"
+    padded = scene_id.zfill(2) if scene_id.isdigit() else scene_id
+    return scene_id in token_set or stripped in token_set or padded in token_set
+
+
 def split_by_scenes(pairs: List[Tuple[Path, Path, str, str]],
                     val_scenes: Optional[Sequence[str]] = None,
                     val_ratio: float = 0.2,
@@ -152,38 +172,92 @@ def split_by_scenes(pairs: List[Tuple[Path, Path, str, str]],
     """
     Split pairs into train and val keeping scenes disjoint to avoid frame leakage.
     """
-    # Group pairs by scene
+    train_pairs, val_pairs, _ = split_train_val_test_by_scenes(
+        pairs,
+        val_scenes=val_scenes,
+        test_scenes=None,
+        val_ratio=val_ratio,
+        test_ratio=0.0,
+        seed=seed,
+    )
+    return train_pairs, val_pairs
+
+
+def split_train_val_test_by_scenes(
+    pairs: List[Tuple[Path, Path, str, str]],
+    val_scenes: Optional[Sequence[str]] = None,
+    test_scenes: Optional[Sequence[str]] = None,
+    val_ratio: float = 0.15,
+    test_ratio: float = 0.15,
+    seed: int = 42,
+) -> Tuple[
+    List[Tuple[Path, Path, str, str]],
+    List[Tuple[Path, Path, str, str]],
+    List[Tuple[Path, Path, str, str]],
+]:
+    """
+    Split pairs into train, val, and optional test sets keeping scenes disjoint.
+    """
     by_scene: Dict[str, List[Tuple[Path, Path, str, str]]] = {}
     for item in pairs:
         by_scene.setdefault(item[3], []).append(item)
 
     unique_scenes = sorted(by_scene.keys(), key=natural_key)
     if not unique_scenes:
-        return [], []
+        return [], [], []
 
+    rng = random.Random(seed)
+    shuffled = list(unique_scenes)
+    rng.shuffle(shuffled)
+
+    test_set = set()
+    if test_scenes:
+        tokens = _scene_tokens(test_scenes)
+        test_set = {s for s in unique_scenes if _matches_scene(s, tokens)}
+        if not test_set:
+            logger.warning("None of --test-scenes %s matched discovered scenes %s", test_scenes, unique_scenes)
+    elif test_ratio > 0 and len(unique_scenes) >= 3:
+        num_test = max(1, min(len(unique_scenes) - 2, int(round(len(unique_scenes) * test_ratio))))
+        test_set = set(shuffled[:num_test])
+
+    remaining = [s for s in shuffled if s not in test_set]
+
+    val_set = set()
     if val_scenes:
-        val_set = {s.strip().zfill(2) if s.strip().isdigit() else s.strip() for s in val_scenes}
-        # Also check without leading zero
-        val_set |= {s.lstrip("0") for s in val_scenes if s.strip()}
-    else:
-        rng = random.Random(seed)
-        shuffled = list(unique_scenes)
-        rng.shuffle(shuffled)
-        num_val_scenes = max(1, int(round(len(unique_scenes) * val_ratio)))
-        val_set = set(shuffled[:num_val_scenes])
+        tokens = _scene_tokens(val_scenes)
+        val_set = {s for s in unique_scenes if s not in test_set and _matches_scene(s, tokens)}
+        if not val_set:
+            logger.warning("None of --val-scenes %s matched available scenes %s", val_scenes, remaining)
+    elif val_ratio > 0 and len(remaining) >= 2:
+        num_val = max(1, min(len(remaining) - 1, int(round(len(unique_scenes) * val_ratio))))
+        val_set = set(remaining[:num_val])
 
     train_pairs: List[Tuple[Path, Path, str, str]] = []
     val_pairs: List[Tuple[Path, Path, str, str]] = []
+    test_pairs: List[Tuple[Path, Path, str, str]] = []
 
     for scene_id, scene_pairs in by_scene.items():
-        if scene_id in val_set or scene_id.lstrip("0") in val_set or scene_id.zfill(2) in val_set:
+        if scene_id in test_set:
+            test_pairs.extend(scene_pairs)
+        elif scene_id in val_set:
             val_pairs.extend(scene_pairs)
         else:
             train_pairs.extend(scene_pairs)
 
     train_pairs.sort(key=lambda item: natural_key(item[2]))
     val_pairs.sort(key=lambda item: natural_key(item[2]))
-    return train_pairs, val_pairs
+    test_pairs.sort(key=lambda item: natural_key(item[2]))
+
+    train_scene_ids = sorted({p[3] for p in train_pairs}, key=natural_key)
+    val_scene_ids = sorted({p[3] for p in val_pairs}, key=natural_key)
+    test_scene_ids = sorted({p[3] for p in test_pairs}, key=natural_key)
+    logger.info(
+        "Scene split -> train: %s (%d clips), val: %s (%d clips), test: %s (%d clips)",
+        train_scene_ids, len(train_pairs),
+        val_scene_ids, len(val_pairs),
+        test_scene_ids, len(test_pairs),
+    )
+    return train_pairs, val_pairs, test_pairs
 
 
 def _link_or_copy(src: Path, dst: Path, copy_only: bool = False) -> None:
@@ -205,7 +279,9 @@ def prepare_vidllvip(input_path: Path,
                      output_dir: Path,
                      scenes: Optional[Sequence[str]] = None,
                      val_scenes: Optional[Sequence[str]] = None,
+                     test_scenes: Optional[Sequence[str]] = None,
                      val_ratio: float = 0.2,
+                     test_ratio: float = 0.0,
                      all_train: bool = False,
                      max_clips: Optional[int] = None,
                      copy_files: bool = False,
@@ -236,36 +312,58 @@ def prepare_vidllvip(input_path: Path,
 
     # Filter by specific scenes if requested
     if scenes:
-        allowed = {s.strip().zfill(2) if s.strip().isdigit() else s.strip() for s in scenes}
-        allowed |= {s.lstrip("0") for s in scenes if s.strip()}
-        pairs = [p for p in pairs if p[3] in allowed or p[3].zfill(2) in allowed or p[3].lstrip("0") in allowed]
+        allowed = _scene_tokens(scenes)
+        pairs = [p for p in pairs if _matches_scene(p[3], allowed)]
         if not pairs:
             raise ValueError(f"No pairs matched --scenes {scenes}")
 
-    # Split train / val
+    # Split train / val / test
     if all_train:
-        train_pairs, val_pairs = pairs, []
+        train_pairs, val_pairs, test_pairs = pairs, [], []
+    elif test_scenes is not None or test_ratio > 0:
+        train_pairs, val_pairs, test_pairs = split_train_val_test_by_scenes(
+            pairs,
+            val_scenes=val_scenes,
+            test_scenes=test_scenes,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
+            seed=seed,
+        )
     else:
         train_pairs, val_pairs = split_by_scenes(
             pairs, val_scenes=val_scenes, val_ratio=val_ratio, seed=seed
         )
+        test_pairs = []
 
     # Apply max_clips if specified (stratified across splits)
     if max_clips is not None and max_clips > 0:
-        total = len(train_pairs) + len(val_pairs)
+        total = len(train_pairs) + len(val_pairs) + len(test_pairs)
         if total > max_clips:
-            if val_pairs:
-                train_quota = max(1, int(round(max_clips * (len(train_pairs) / total))))
-                val_quota = max(1, max_clips - train_quota)
+            if val_pairs or test_pairs:
+                val_quota = max(1, int(round(max_clips * (len(val_pairs) / total)))) if val_pairs else 0
+                test_quota = max(1, int(round(max_clips * (len(test_pairs) / total)))) if test_pairs else 0
+                train_quota = max(1, max_clips - val_quota - test_quota)
                 train_pairs = train_pairs[:train_quota]
                 val_pairs = val_pairs[:val_quota]
+                test_pairs = test_pairs[:test_quota]
             else:
                 train_pairs = train_pairs[:max_clips]
 
     output_dir = Path(output_dir)
-    splits = [("train", train_pairs), ("val", val_pairs)]
-    counts = {"train": len(train_pairs), "val": len(val_pairs)}
+    splits: List[Tuple[str, List[Tuple[Path, Path, str, str]]]] = [
+        ("train", train_pairs),
+        ("val", val_pairs),
+    ]
+    if test_pairs:
+        splits.append(("test", test_pairs))
 
+    counts = {
+        "train": len(train_pairs),
+        "val": len(val_pairs),
+        "test": len(test_pairs),
+    }
+
+    eval_split = "test" if test_pairs else "val"
     manifest_entries = []
 
     for split_name, split_pairs in splits:
@@ -281,7 +379,7 @@ def prepare_vidllvip(input_path: Path,
             _link_or_copy(vi_path, rgb_dest, copy_only=copy_files)
             _link_or_copy(ir_path, ir_dest, copy_only=copy_files)
 
-            if split_name == "val" and eval_manifest is not None:
+            if split_name == eval_split and eval_manifest is not None:
                 manifest_dir = eval_manifest.parent
                 manifest_entries.append({
                     "sequence_id": seq_id,
@@ -293,8 +391,8 @@ def prepare_vidllvip(input_path: Path,
     if eval_manifest is not None and manifest_entries:
         eval_manifest.parent.mkdir(parents=True, exist_ok=True)
         manifest_data = {
-            "name": "vidllvip_val",
-            "description": "Held-out normal validation clips from VidLLVIP",
+            "name": f"vidllvip_{eval_split}",
+            "description": f"Held-out normal {eval_split} clips from VidLLVIP",
             "videos": manifest_entries,
         }
         with open(eval_manifest, "w", encoding="utf-8") as handle:
@@ -316,7 +414,7 @@ def main() -> None:
     parser.add_argument(
         "--output",
         default="Data",
-        help="Destination directory for Data/train and Data/val (default: Data)",
+        help="Destination directory for Data/train, Data/val, and optional Data/test (default: Data)",
     )
     parser.add_argument(
         "--scenes",
@@ -326,7 +424,12 @@ def main() -> None:
     parser.add_argument(
         "--val-scenes",
         default=None,
-        help="Comma-separated scene IDs to reserve for validation (e.g. 12,13,14).",
+        help="Comma-separated scene IDs to reserve for validation (e.g. 12).",
+    )
+    parser.add_argument(
+        "--test-scenes",
+        default=None,
+        help="Comma-separated scene IDs to reserve for held-out testing (e.g. 13,14).",
     )
     parser.add_argument(
         "--val-ratio",
@@ -335,9 +438,15 @@ def main() -> None:
         help="Fraction of scenes held out for validation when --val-scenes is not given (default: 0.2)",
     )
     parser.add_argument(
+        "--test-ratio",
+        type=float,
+        default=0.0,
+        help="Fraction of scenes held out for testing when --test-scenes is not given (default: 0.0)",
+    )
+    parser.add_argument(
         "--all-train",
         action="store_true",
-        help="Place all discovered clips into Data/train (no validation split).",
+        help="Place all discovered clips into Data/train (no validation/test split).",
     )
     parser.add_argument(
         "--max-clips",
@@ -353,7 +462,7 @@ def main() -> None:
     parser.add_argument(
         "--eval-manifest",
         default="Evaluation/manifest_vidllvip.json",
-        help="Path to generate evaluation manifest for validation clips (default: Evaluation/manifest_vidllvip.json)",
+        help="Path to generate evaluation manifest for held-out test (or val) clips (default: Evaluation/manifest_vidllvip.json)",
     )
     parser.add_argument(
         "--seed",
@@ -371,6 +480,7 @@ def main() -> None:
 
     scenes = [s.strip() for s in args.scenes.split(",")] if args.scenes else None
     val_scenes = [s.strip() for s in args.val_scenes.split(",")] if args.val_scenes else None
+    test_scenes = [s.strip() for s in args.test_scenes.split(",")] if args.test_scenes else None
     eval_manifest = Path(args.eval_manifest) if args.eval_manifest else None
 
     counts = prepare_vidllvip(
@@ -378,7 +488,9 @@ def main() -> None:
         output_dir=Path(args.output),
         scenes=scenes,
         val_scenes=val_scenes,
+        test_scenes=test_scenes,
         val_ratio=args.val_ratio,
+        test_ratio=args.test_ratio,
         all_train=args.all_train,
         max_clips=args.max_clips,
         copy_files=args.copy,
@@ -391,6 +503,7 @@ def main() -> None:
         f"  Output directory: {args.output}\n"
         f"  Train pairs:     {counts['train']}\n"
         f"  Val pairs:       {counts['val']}\n"
+        f"  Test pairs:      {counts['test']}\n"
         f"  Eval manifest:   {eval_manifest if eval_manifest else 'None'}\n"
     )
 

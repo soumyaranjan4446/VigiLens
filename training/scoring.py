@@ -215,18 +215,30 @@ def score_fused_sequence(model,
     return raw, smoothed
 
 
+_VALID_MODALITIES = ("auto", "rgb+ir", "rgb", "ir")
+
+
 @torch.inference_mode()
 def score_cache_file(model,
                      cache_path: Union[str, Path],
                      smoothing_window: int = 1,
                      chunk_size: int = 256,
-                     device: Optional[Union[str, torch.device]] = None) -> Dict[str, Any]:
+                     device: Optional[Union[str, torch.device]] = None,
+                     modality: str = "auto") -> Dict[str, Any]:
     """
     Score every frame in a cached feature file.
+
+    Args:
+        modality: ``"auto"`` / ``"rgb+ir"`` (use IR when cached), ``"rgb"``
+            (ignore IR), or ``"ir"`` (ignore RGB).
 
     Returns a dictionary with raw/smoothed scores, labels (if the cache or its
     sidecar contains them), and metadata used by the evaluation report.
     """
+    modality = str(modality or "auto").lower()
+    if modality not in _VALID_MODALITIES:
+        raise ValueError(f"Unsupported modality '{modality}'; expected one of {_VALID_MODALITIES}")
+
     if hasattr(model, "eval"):
         model.eval()
     if hasattr(model, "fusion"):
@@ -243,22 +255,29 @@ def score_cache_file(model,
     if ir is not None:
         ir = ir.float()
 
+    use_rgb = modality in ("auto", "rgb+ir", "rgb")
+    use_ir = modality in ("auto", "rgb+ir", "ir") and has_ir
+    if modality == "ir" and not has_ir:
+        raise ValueError(f"IR-only evaluation requested, but no IR features cached in {cache_path}")
+
     target_device = torch.device(device) if device is not None else _model_device(model)
-    rgb = rgb.to(target_device)
-    if ir is not None:
+    if use_rgb:
+        rgb = rgb.to(target_device)
+    if use_ir and ir is not None:
         ir = ir.to(target_device)
 
     # Fuse the whole video in chunks, then score it.  For typical clips this
     # is a few MB; the chunking keeps very long evaluation videos bounded.
+    num_frames = int(rgb.shape[0])
     fused_chunks = []
-    for start in range(0, rgb.shape[0], chunk_size):
+    for start in range(0, num_frames, chunk_size):
         end = start + chunk_size
-        rgb_chunk = rgb[start:end]
-        ir_chunk = ir[start:end] if ir is not None else None
+        rgb_chunk = rgb[start:end] if use_rgb else None
+        ir_chunk = ir[start:end] if (use_ir and ir is not None) else None
         fused_chunks.append(
-            fuse_features(model, rgb_chunk, ir_chunk, True, has_ir)
+            fuse_features(model, rgb_chunk, ir_chunk, use_rgb, use_ir)
         )
-    fused = torch.cat(fused_chunks, dim=0) if fused_chunks else rgb.new_zeros((0, 512))
+    fused = torch.cat(fused_chunks, dim=0) if fused_chunks else rgb.new_zeros((0, 512), device=target_device)
 
     raw, smoothed = score_fused_sequence(model, fused, smoothing_window, chunk_size)
 

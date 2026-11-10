@@ -63,3 +63,23 @@ def test_prediction_errors_exclude_first_frame(tiny_model, make_cache, tmp_path)
     errors = prediction_errors(tiny_model, [first, second])
     assert errors.shape == (9 + 5,)
     assert np.isfinite(errors).all()
+
+
+def test_score_cache_file_modality_ablation(tiny_model, make_cache, tmp_path):
+    both = make_cache(tmp_path / "both.pt", num_frames=6, has_ir=True)
+    res_auto = score_cache_file(tiny_model, both, modality="auto")
+    res_mm = score_cache_file(tiny_model, both, modality="rgb+ir")
+    res_rgb = score_cache_file(tiny_model, both, modality="rgb")
+    res_ir = score_cache_file(tiny_model, both, modality="ir")
+
+    np.testing.assert_allclose(res_auto["raw_scores"], res_mm["raw_scores"])
+    assert not np.allclose(res_rgb["raw_scores"], res_mm["raw_scores"])
+    assert not np.allclose(res_ir["raw_scores"], res_mm["raw_scores"])
+
+    rgb_only = make_cache(tmp_path / "rgb_only.pt", num_frames=6, has_ir=False)
+    try:
+        score_cache_file(tiny_model, rgb_only, modality="ir")
+    except ValueError as exc:
+        assert "no IR features" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError when IR requested without cached IR")

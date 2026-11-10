@@ -229,7 +229,7 @@ class CachedFeatureDataset(Dataset):
                  sequence_stride: int = 1,
                  rgb_dropout_prob: float = 0.15,
                  ir_dropout_prob: float = 0.15,
-                 max_cached_videos: int = 4):
+                 max_cached_videos: Optional[int] = 4):
         self.cache_paths = [Path(p) for p in cache_paths]
         if not self.cache_paths:
             raise ValueError("cache_paths is empty")
@@ -237,7 +237,10 @@ class CachedFeatureDataset(Dataset):
         self.sequence_stride = max(1, int(sequence_stride))
         self.rgb_dropout_prob = float(rgb_dropout_prob)
         self.ir_dropout_prob = float(ir_dropout_prob)
-        self.max_cached_videos = max(1, int(max_cached_videos))
+        self.max_cached_videos = (
+            None if max_cached_videos is None or int(max_cached_videos) <= 0
+            else int(max_cached_videos)
+        )
 
         self.index: List[Tuple[int, int]] = []
         self.metadata: List[Dict] = []
@@ -300,8 +303,9 @@ class CachedFeatureDataset(Dataset):
         if "rgb_features" not in data:
             raise ValueError(f"Cache file missing rgb_features: {self.cache_paths[cache_idx]}")
         self._cache[cache_idx] = data
-        while len(self._cache) > self.max_cached_videos:
-            self._cache.popitem(last=False)
+        if self.max_cached_videos is not None:
+            while len(self._cache) > self.max_cached_videos:
+                self._cache.popitem(last=False)
         return data
 
     def __len__(self) -> int:

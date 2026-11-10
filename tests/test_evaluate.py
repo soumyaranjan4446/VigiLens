@@ -122,3 +122,20 @@ def test_evaluate_manifest_frame_labels_file(tiny_model, make_cache, tmp_path):
     )
     assert result["metrics"]["num_anomaly"] == 2
     assert result["metrics"]["num_normal"] == 3
+
+
+def test_evaluate_manifest_modality_option(tiny_model, make_cache, tmp_path):
+    cache = make_cache(tmp_path / "cache" / "pair.pt", num_frames=6, has_ir=True, labels=[0] * 6)
+    manifest = _write_manifest(tmp_path / "manifest.json", [
+        {"sequence_id": "pair", "rgb": "pair_rgb.mp4", "cache": str(cache)},
+    ])
+
+    rgb_res = evaluate_manifest(
+        tiny_model, manifest, output_dir=tmp_path / "res_rgb", device="cpu", modality="rgb"
+    )
+    ir_res = evaluate_manifest(
+        tiny_model, manifest, output_dir=tmp_path / "res_ir", device="cpu", modality="ir"
+    )
+    assert rgb_res["modality"] == "rgb"
+    assert ir_res["modality"] == "ir"
+    assert rgb_res["per_video"][0]["mean_raw_score"] != ir_res["per_video"][0]["mean_raw_score"]

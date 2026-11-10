@@ -114,3 +114,15 @@ def test_pairing_rejects_duplicate_sequence_ids(tmp_path):
         assert "Duplicate RGB sequence ID" in str(exc)
     else:
         raise AssertionError("Duplicate sequence IDs should raise")
+
+
+def test_cached_dataset_unlimited_cache(make_cache, tmp_path):
+    paths = [
+        make_cache(tmp_path / f"v{i}.pt", num_frames=6, has_ir=True, seed=i)
+        for i in range(6)
+    ]
+    dataset = CachedFeatureDataset(paths, sequence_length=4, max_cached_videos=0)
+    assert dataset.max_cached_videos is None
+    for idx in range(len(dataset)):
+        _ = dataset[idx]
+    assert len(dataset._cache) == 6
