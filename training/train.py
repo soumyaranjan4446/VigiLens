@@ -79,6 +79,70 @@ def _move_batch(batch: Dict, device: str) -> Dict:
 # Cached-feature training
 # ---------------------------------------------------------------------------
 
+def _anti_collapse_losses(
+    model,
+    fused: torch.Tensor,
+    rgb_sequence: torch.Tensor,
+    ir_sequence: Optional[torch.Tensor],
+    rgb_available,
+    ir_available,
+    aux_decoders: Optional[torch.nn.ModuleDict],
+    align_weight: float = 0.5,
+    target_std: float = 0.5,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Compute reconstruction, variance, and cross-modal alignment terms.
+
+    Jointly training ``fusion`` and ``temporal`` purely on next-feature
+    prediction admits a trivial constant-output solution.  Reconstructing the
+    input modalities from ``fused`` and penalizing low per-dimension variance
+    anchors the 512-D embedding space without changing the inference graph,
+    while aligning single-modality adapters to paired fusion keeps RGB-only and
+    IR-only scores consistent with the calibrated RGB+IR threshold.
+    """
+    device = fused.device
+    z_flat = fused.reshape(-1, fused.shape[-1]).float()
+
+    loss_var = torch.zeros((), device=device)
+    if z_flat.shape[0] > 1:
+        std = torch.sqrt(z_flat.var(dim=0, unbiased=False) + 1e-4)
+        loss_var = F.relu(target_std - std).mean()
+
+    batch_size = fused.shape[0]
+    rgb_mask = torch.as_tensor(rgb_available, device=device, dtype=torch.bool).reshape(-1)
+    ir_mask = torch.as_tensor(ir_available, device=device, dtype=torch.bool).reshape(-1)
+    if rgb_mask.numel() == 1:
+        rgb_mask = rgb_mask.expand(batch_size)
+    if ir_mask.numel() == 1:
+        ir_mask = ir_mask.expand(batch_size)
+
+    loss_rec = torch.zeros((), device=device)
+    if aux_decoders is not None:
+        rec_terms = []
+        if bool(rgb_mask.any()):
+            pred_rgb = aux_decoders["rgb"](fused[rgb_mask])
+            rec_terms.append(F.smooth_l1_loss(pred_rgb, rgb_sequence[rgb_mask]))
+        if ir_sequence is not None and bool(ir_mask.any()):
+            pred_ir = aux_decoders["ir"](fused[ir_mask])
+            rec_terms.append(F.smooth_l1_loss(pred_ir, ir_sequence[ir_mask]))
+        if rec_terms:
+            loss_rec = torch.stack(rec_terms).mean()
+
+    loss_align = torch.zeros((), device=device)
+    if align_weight > 0 and ir_sequence is not None:
+        both_mask = rgb_mask & ir_mask
+        if bool(both_mask.any()):
+            target = fused[both_mask].detach().reshape(-1, fused.shape[-1])
+            rgb_both = rgb_sequence[both_mask].reshape(-1, rgb_sequence.shape[-1])
+            ir_both = ir_sequence[both_mask].reshape(-1, ir_sequence.shape[-1])
+            fused_rgb = model.fusion(rgb_both, None, True, False)
+            fused_ir = model.fusion(None, ir_both, False, True)
+            loss_align = 0.5 * (
+                F.smooth_l1_loss(fused_rgb, target) + F.smooth_l1_loss(fused_ir, target)
+            )
+
+    return loss_rec, loss_var, loss_align
+
+
 def train_epoch_cached(model,
                        dataloader: DataLoader,
                        optimizer: torch.optim.Optimizer,
@@ -87,11 +151,18 @@ def train_epoch_cached(model,
                        grad_clip: float = 1.0,
                        scaler: Optional[torch.amp.GradScaler] = None,
                        limit_batches: Optional[int] = None,
-                       epoch: int = 0) -> float:
+                       epoch: int = 0,
+                       aux_decoders: Optional[torch.nn.ModuleDict] = None,
+                       aux_optimizer: Optional[torch.optim.Optimizer] = None,
+                       rec_weight: float = 1.0,
+                       var_weight: float = 1.0,
+                       align_weight: float = 0.5) -> float:
     """Train one epoch on cached feature sequences."""
     model.train()
     model.fusion.train()
     model.temporal.train()
+    if aux_decoders is not None:
+        aux_decoders.train()
 
     total_loss = 0.0
     num_batches = 0
@@ -107,13 +178,29 @@ def train_epoch_cached(model,
         ir_available = batch["ir_available"]
 
         optimizer.zero_grad(set_to_none=True)
+        if aux_optimizer is not None:
+            aux_optimizer.zero_grad(set_to_none=True)
+
         with _autocast(device, amp):
             fused = fuse_sequence(
                 model, rgb_sequence, ir_sequence, rgb_available, ir_available
             )
-            predictions, _ = model.temporal.forward_sequence(fused[:, :-1])
-            targets = fused[:, 1:]
-            loss = F.smooth_l1_loss(predictions, targets)
+            # When fusion is anchored by reconstruction/variance, isolate the
+            # temporal predictor so it cannot smooth out intra-clip motion.
+            temporal_seq = fused.detach() if (rec_weight > 0 or var_weight > 0) else fused
+            predictions, _ = model.temporal.forward_sequence(temporal_seq[:, :-1])
+            targets = fused[:, 1:].detach()
+            loss_pred = F.smooth_l1_loss(predictions, targets)
+            loss_rec, loss_var, loss_align = _anti_collapse_losses(
+                model, fused, rgb_sequence, ir_sequence, rgb_available, ir_available,
+                aux_decoders, align_weight=align_weight,
+            )
+            loss = (
+                loss_pred
+                + rec_weight * loss_rec
+                + var_weight * loss_var
+                + align_weight * loss_align
+            )
 
         if not torch.isfinite(loss):
             logger.warning("Skipping non-finite loss at batch %d", batch_index)
@@ -122,17 +209,27 @@ def train_epoch_cached(model,
         if scaler is not None and scaler.is_enabled():
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
+            if aux_optimizer is not None:
+                scaler.unscale_(aux_optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            if aux_decoders is not None:
+                torch.nn.utils.clip_grad_norm_(aux_decoders.parameters(), grad_clip)
             scaler.step(optimizer)
+            if aux_optimizer is not None:
+                scaler.step(aux_optimizer)
             scaler.update()
         else:
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            if aux_decoders is not None:
+                torch.nn.utils.clip_grad_norm_(aux_decoders.parameters(), grad_clip)
             optimizer.step()
+            if aux_optimizer is not None:
+                aux_optimizer.step()
 
-        total_loss += float(loss.item())
+        total_loss += float(loss_pred.item())
         num_batches += 1
-        progress.set_postfix(loss=f"{loss.item():.4f}")
+        progress.set_postfix(pred=f"{loss_pred.item():.4f}", rec=f"{loss_rec.item():.4f}")
 
     return total_loss / num_batches if num_batches else float("nan")
 
@@ -153,7 +250,10 @@ def train_cached(model,
                  num_workers: int = 0,
                  seed: int = 42,
                  limit_batches: Optional[int] = None,
-                 val_batch_size: Optional[int] = None) -> Dict:
+                 val_batch_size: Optional[int] = None,
+                 rec_weight: float = 1.0,
+                 var_weight: float = 1.0,
+                 align_weight: float = 0.5) -> Dict:
     """Train fusion + temporal model on cached features."""
     seed_everything(seed)
     checkpoint_dir = Path(checkpoint_dir)
@@ -180,6 +280,20 @@ def train_cached(model,
 
     trainable = [p for p in model.parameters() if p.requires_grad]
     optimizer = torch.optim.AdamW(trainable, lr=learning_rate, weight_decay=weight_decay)
+
+    aux_decoders = None
+    aux_optimizer = None
+    if rec_weight > 0:
+        feat_dim = int(getattr(model.fusion, "input_dim", 2048))
+        fused_dim = int(getattr(model.fusion, "output_dim", 512))
+        aux_decoders = torch.nn.ModuleDict({
+            "rgb": torch.nn.Linear(fused_dim, feat_dim),
+            "ir": torch.nn.Linear(fused_dim, feat_dim),
+        }).to(device)
+        aux_optimizer = torch.optim.AdamW(
+            aux_decoders.parameters(), lr=learning_rate, weight_decay=weight_decay
+        )
+
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=1e-6
     )
@@ -222,6 +336,9 @@ def train_cached(model,
         train_loss = train_epoch_cached(
             model, train_loader, optimizer, device, amp=amp, grad_clip=grad_clip,
             scaler=scaler, limit_batches=limit_batches, epoch=epoch,
+            aux_decoders=aux_decoders, aux_optimizer=aux_optimizer,
+            rec_weight=rec_weight, var_weight=var_weight,
+            align_weight=align_weight,
         )
         val_result = validate_cached(
             model,
@@ -647,6 +764,12 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit-batches", type=int, default=None)
     parser.add_argument("--unfreeze-layer4", action="store_true")
+    parser.add_argument("--rec-weight", type=float, default=1.0,
+                        help="Auxiliary input reconstruction weight preventing fusion collapse")
+    parser.add_argument("--var-weight", type=float, default=1.0,
+                        help="Variance regularization weight preventing fusion collapse")
+    parser.add_argument("--align-weight", type=float, default=0.5,
+                        help="Cross-modal alignment weight keeping RGB-only/IR-only aligned to RGB+IR")
     parser.add_argument("--calibrate", action="store_true", help="Calibrate after training")
     args = parser.parse_args()
 
@@ -731,6 +854,8 @@ def main() -> None:
             checkpoint_dir=args.checkpoint_dir, config_dict=config.to_dict(),
             resume=args.resume, num_workers=args.workers, seed=args.seed,
             limit_batches=args.limit_batches, val_batch_size=args.val_batch_size,
+            rec_weight=args.rec_weight, var_weight=args.var_weight,
+            align_weight=args.align_weight,
         )
 
     print(json.dumps(result, indent=2))

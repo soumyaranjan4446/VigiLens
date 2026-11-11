@@ -114,3 +114,28 @@ def test_checkpoint_round_trip_without_extractors(tmp_path):
         assert "load_extractors=True" in str(exc)
     else:
         raise AssertionError("include_encoders should require extractors")
+
+
+def test_train_cached_prevents_representation_collapse(tiny_model, make_cache, tmp_path):
+    train_cache = make_cache(tmp_path / "cache" / "train" / "a.pt", num_frames=16, has_ir=True, seed=0)
+    val_cache = make_cache(tmp_path / "cache" / "val" / "b.pt", num_frames=12, has_ir=True, seed=1)
+    train_dataset = _dataset([train_cache], sequence_length=4)
+    val_dataset = _dataset([val_cache], sequence_length=4)
+
+    train_cached(
+        tiny_model,
+        train_dataset,
+        val_dataset,
+        device="cpu",
+        epochs=5,
+        batch_size=4,
+        learning_rate=1e-3,
+        amp=False,
+        checkpoint_dir=tmp_path / "checkpoints",
+    )
+
+    data = torch.load(val_cache, map_location="cpu", weights_only=True)
+    tiny_model.eval()
+    with torch.no_grad():
+        z = tiny_model.fusion(data["rgb_features"].float(), data["ir_features"].float(), True, True)
+    assert float(z.std(dim=0).mean().item()) > 0.1
