@@ -170,7 +170,9 @@ def causal_moving_average(scores: np.ndarray, window: int) -> np.ndarray:
 def score_fused_sequence(model,
                          fused: torch.Tensor,
                          smoothing_window: int = 1,
-                         chunk_size: int = 256) -> Tuple[np.ndarray, np.ndarray]:
+                         chunk_size: int = 256,
+                         score_variant: str = "mse",
+                         diag_variance: Optional[Union[np.ndarray, torch.Tensor]] = None) -> Tuple[np.ndarray, np.ndarray]:
     """
     Compute per-frame prediction errors and their causal smoothed version.
 
@@ -201,13 +203,32 @@ def score_fused_sequence(model,
         predictions = predictions.squeeze(0)  # (C, D)
         length = end - start
 
+        diag_var_t = None
+        if diag_variance is not None:
+            if not isinstance(diag_variance, torch.Tensor):
+                diag_var_t = torch.tensor(diag_variance, dtype=torch.float32, device=fused.device)
+            else:
+                diag_var_t = diag_variance.to(device=fused.device, dtype=torch.float32)
+
         if length > 1:
-            errors = F.mse_loss(predictions[:-1], fused[start + 1:end], reduction="none").mean(dim=1)
+            diff_sq = (predictions[:-1] - fused[start + 1:end]).pow(2)
+            if score_variant == "norm_mse" and diag_var_t is not None:
+                errors = (diff_sq / (diag_var_t + 1e-4)).mean(dim=1)
+            elif score_variant == "cosine":
+                sim = F.cosine_similarity(predictions[:-1], fused[start + 1:end], dim=1)
+                errors = 1.0 - sim
+            else:
+                errors = diff_sq.mean(dim=1)
             raw[start + 1:end] = errors.detach().cpu().numpy()
         if previous_prediction is not None:
-            raw[start] = F.mse_loss(
-                previous_prediction, fused[start], reduction="none"
-            ).mean().item()
+            diff_prev_sq = (previous_prediction - fused[start]).pow(2)
+            if score_variant == "norm_mse" and diag_var_t is not None:
+                raw[start] = (diff_prev_sq / (diag_var_t + 1e-4)).mean().item()
+            elif score_variant == "cosine":
+                sim_prev = F.cosine_similarity(previous_prediction.unsqueeze(0), fused[start].unsqueeze(0), dim=1)
+                raw[start] = (1.0 - sim_prev).item()
+            else:
+                raw[start] = diff_prev_sq.mean().item()
         previous_prediction = predictions[-1].detach()
         offset = end
 
@@ -224,7 +245,9 @@ def score_cache_file(model,
                      smoothing_window: int = 1,
                      chunk_size: int = 256,
                      device: Optional[Union[str, torch.device]] = None,
-                     modality: str = "auto") -> Dict[str, Any]:
+                     modality: str = "auto",
+                     score_variant: str = "mse",
+                     diag_variance: Optional[Union[np.ndarray, torch.Tensor]] = None) -> Dict[str, Any]:
     """
     Score every frame in a cached feature file.
 
@@ -279,7 +302,10 @@ def score_cache_file(model,
         )
     fused = torch.cat(fused_chunks, dim=0) if fused_chunks else rgb.new_zeros((0, 512), device=target_device)
 
-    raw, smoothed = score_fused_sequence(model, fused, smoothing_window, chunk_size)
+    raw, smoothed = score_fused_sequence(
+        model, fused, smoothing_window, chunk_size,
+        score_variant=score_variant, diag_variance=diag_variance
+    )
 
     labels = data.get("labels")
     if labels is None:
@@ -319,16 +345,25 @@ def prediction_errors(model,
                       cache_paths,
                       smoothing_window: int = 1,
                       chunk_size: int = 256,
-                      device: Optional[Union[str, torch.device]] = None) -> np.ndarray:
+                      device: Optional[Union[str, torch.device]] = None,
+                      score_variant: str = "mse",
+                      diag_variance: Optional[Union[np.ndarray, torch.Tensor]] = None) -> np.ndarray:
     """Collect non-zero prediction errors from one or more cache files."""
     errors = []
     for path in cache_paths:
         result = score_cache_file(
-            model, path, smoothing_window=1, chunk_size=chunk_size, device=device
+            model,
+            path,
+            smoothing_window=smoothing_window,
+            chunk_size=chunk_size,
+            device=device,
+            score_variant=score_variant,
+            diag_variance=diag_variance,
         )
         # Frame 0 has no prediction and its placeholder zero is not a real
         # normal-data error; exclude it from calibration statistics.
-        errors.append(result["raw_scores"][1:])
+        score_key = "smoothed_scores" if smoothing_window > 1 else "raw_scores"
+        errors.append(result[score_key][1:])
     if not errors:
         return np.zeros((0,), dtype=np.float32)
     return np.concatenate(errors).astype(np.float32)

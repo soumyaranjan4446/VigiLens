@@ -167,7 +167,9 @@ def evaluate_manifest(model,
                       chunk_size: int = 256,
                       device: Optional[Union[str, torch.device]] = None,
                       write_csv: bool = True,
-                      modality: str = "auto") -> Dict[str, Any]:
+                      modality: str = "auto",
+                      score_variant: Optional[str] = None,
+                      diag_variance: Optional[Union[np.ndarray, torch.Tensor]] = None) -> Dict[str, Any]:
     """Score a manifest and write per-frame scores plus a JSON summary."""
     manifest_path = Path(manifest_path)
     base_dir = manifest_path.parent
@@ -194,6 +196,12 @@ def evaluate_manifest(model,
             calibration = json.load(handle)
         if threshold is None:
             threshold = calibration.get("threshold", calibration.get("threshold_std"))
+        if diag_variance is None and "diag_variance" in calibration:
+            diag_variance = np.asarray(calibration["diag_variance"], dtype=np.float32)
+        if score_variant is None and "score_variant" in calibration:
+            score_variant = calibration["score_variant"]
+    if score_variant is None:
+        score_variant = "mse"
     if threshold is None:
         threshold = 0.5
 
@@ -219,6 +227,8 @@ def evaluate_manifest(model,
             chunk_size=chunk_size,
             device=device,
             modality=modality,
+            score_variant=score_variant,
+            diag_variance=diag_variance,
         )
         labels = labels_for_entry(
             entry, result["num_frames"], base_dir, result.get("labels")
@@ -328,6 +338,7 @@ def evaluate_manifest(model,
         "manifest": str(manifest_path),
         "cache_dir": str(cache_root) if cache_root is not None else None,
         "modality": modality,
+        "score_variant": score_variant,
         "num_videos": len(per_video),
         "num_frames": int(labels.size),
         "score_type": score_type,
@@ -402,6 +413,7 @@ def main() -> None:
     parser.add_argument("--smoothing-window", type=int, default=1)
     parser.add_argument("--chunk-size", type=int, default=256)
     parser.add_argument("--modality", default="auto", choices=["auto", "rgb+ir", "rgb", "ir"])
+    parser.add_argument("--score-variant", default=None, choices=["mse", "norm_mse", "cosine", "relative"])
     parser.add_argument("--output-dir", default="Evaluation/results")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--no-csv", action="store_true")
@@ -433,6 +445,7 @@ def main() -> None:
         device=args.device,
         write_csv=not args.no_csv,
         modality=args.modality,
+        score_variant=args.score_variant,
     )
     _print_summary(summary)
 

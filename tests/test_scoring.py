@@ -83,3 +83,17 @@ def test_score_cache_file_modality_ablation(tiny_model, make_cache, tmp_path):
         assert "no IR features" in str(exc)
     else:
         raise AssertionError("Expected ValueError when IR requested without cached IR")
+
+
+def test_score_variants_execution(tiny_model, make_cache, tmp_path):
+    path = make_cache(tmp_path / "var_test.pt", num_frames=8, has_ir=True)
+    var = np.ones(512, dtype=np.float32) * 0.5
+    res_mse = score_cache_file(tiny_model, path, score_variant="mse")
+    res_norm = score_cache_file(tiny_model, path, score_variant="norm_mse", diag_variance=var)
+    res_cos = score_cache_file(tiny_model, path, score_variant="cosine")
+
+    assert res_mse["raw_scores"].shape == (8,)
+    assert res_norm["raw_scores"].shape == (8,)
+    assert res_cos["raw_scores"].shape == (8,)
+    assert np.all(res_norm["raw_scores"][1:] > 0)
+    assert np.all(res_cos["raw_scores"][1:] >= 0)

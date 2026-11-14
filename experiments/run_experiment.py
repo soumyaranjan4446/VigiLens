@@ -204,8 +204,26 @@ def run_experiment_fold(
     # 2. Calibrate threshold on disjoint calibration scenes
     calibrator = AnomalyCalibrator(model)
     calib_caches = calib_paths if calib_paths else val_paths
-    calib_errors = calibrator.collect_errors_from_caches(calib_caches, device=device)
-    calib_info = calibrator.compute_threshold(calib_errors, method=calib_method)
+
+    diag_var = None
+    if score_variant == "norm_mse":
+        diag_var = calibrator.compute_residual_variance(calib_caches, device=device)
+        diag_var_list = diag_var.tolist()
+    else:
+        diag_var_list = None
+
+    calib_errors = calibrator.collect_errors_from_caches(
+        calib_caches,
+        device=device,
+        smoothing_window=smoothing_window,
+        score_variant=score_variant,
+        diag_variance=diag_var,
+    )
+    calib_info = calibrator.compute_threshold(calib_errors, method=calib_method, target_fpr=target_fpr)
+    calib_info["score_variant"] = score_variant
+    if diag_var_list is not None:
+        calib_info["diag_variance"] = diag_var_list
+
     threshold = float(calib_info["threshold"])
     calib_json = fold_dir / "calibration.json"
     calibrator.save_calibration(calib_info, calib_json)
@@ -249,6 +267,7 @@ def run_experiment_fold(
             smoothing_window=smoothing_window,
             device=device,
             modality=mod,
+            score_variant=score_variant,
         )
 
         m = eval_summary["metrics"]
@@ -322,6 +341,9 @@ def main() -> None:
     parser.add_argument("--patience", type=int, default=None)
     parser.add_argument("--freeze-fusion-epoch", type=int, default=None)
     parser.add_argument("--smoothing-window", type=int, default=5)
+    parser.add_argument("--score-variant", choices=["mse", "norm_mse", "cosine", "relative"], default="mse")
+    parser.add_argument("--calib-method", choices=["std", "percentile", "mad", "conformal"], default="std")
+    parser.add_argument("--target-fpr", type=float, default=0.05)
     parser.add_argument("--notes", default="")
     parser.add_argument("--results-csv", default="experiments/results.csv")
     args = parser.parse_args()
@@ -366,8 +388,11 @@ def main() -> None:
                 input_noise=args.input_noise,
                 patience=args.patience,
                 freeze_fusion_epoch=args.freeze_fusion_epoch,
+                calib_method=args.calib_method,
+                target_fpr=args.target_fpr,
                 smoothing_window=args.smoothing_window,
                 modalities=modalities,
+                score_variant=args.score_variant,
                 notes=args.notes,
                 results_csv=Path(args.results_csv),
             )

@@ -19,7 +19,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
-from training.scoring import prediction_errors
+from training.scoring import _model_device, fuse_features, prediction_errors
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +35,43 @@ class AnomalyCalibrator:
         self.k_std = float(k_std)
         self.percentile = float(percentile)
 
+    def compute_residual_variance(self,
+                                  cache_paths: Sequence[Union[str, Path]],
+                                  device: Optional[str] = None) -> np.ndarray:
+        """Compute per-dimension diagonal residual variance on calibration clips."""
+        cache_paths = [Path(path) for path in cache_paths]
+        if not cache_paths:
+            raise ValueError("No cache files were provided to compute residual variance")
+        self.model.eval()
+        target_device = torch.device(device) if device is not None else _model_device(self.model)
+        diffs = []
+        for p in cache_paths:
+            data = torch.load(p, map_location=target_device)
+            rgb = data["rgb_features"].float().to(target_device)
+            ir = data.get("ir_features")
+            has_ir = bool(data.get("has_ir", ir is not None)) and ir is not None
+            if has_ir:
+                ir = ir.float().to(target_device)
+            with torch.no_grad():
+                fused = fuse_features(self.model, rgb, ir if has_ir else None, True, has_ir)
+                predictions, _ = self.model.temporal.forward_sequence(fused.unsqueeze(0))
+                d = (predictions.squeeze(0)[:-1] - fused[1:]).detach().cpu().numpy()
+                diffs.append(d)
+        if not diffs:
+            return np.ones(512, dtype=np.float32)
+        all_diffs = np.concatenate(diffs, axis=0)
+        diag_var = np.var(all_diffs, axis=0) + 1e-4
+        return diag_var.astype(np.float32)
+
     def collect_errors_from_caches(self,
                                    cache_paths: Sequence[Union[str, Path]],
                                    device: Optional[str] = None,
                                    batch_size: int = 8,
                                    sequence_length: int = 16,
-                                   limit: Optional[int] = None) -> List[float]:
+                                   limit: Optional[int] = None,
+                                   smoothing_window: int = 1,
+                                   score_variant: str = "mse",
+                                   diag_variance: Optional[Union[np.ndarray, torch.Tensor]] = None) -> List[float]:
         """Collect per-frame prediction errors from cached feature files."""
         cache_paths = [Path(path) for path in cache_paths]
         if limit is not None:
@@ -52,8 +83,10 @@ class AnomalyCalibrator:
         errors = prediction_errors(
             self.model,
             tqdm(cache_paths, desc="Calibrating"),
-            smoothing_window=1,
+            smoothing_window=smoothing_window,
             device=device,
+            score_variant=score_variant,
+            diag_variance=diag_variance,
         )
         return errors.tolist()
 
@@ -79,22 +112,39 @@ class AnomalyCalibrator:
             "or use `--cache-dir`."
         )
 
-    def compute_threshold(self, errors: Sequence[float], method: str = "std") -> Dict:
+    def compute_threshold(self,
+                          errors: Sequence[float],
+                          method: str = "std",
+                          target_fpr: Optional[float] = None) -> Dict:
         """Compute calibration statistics from normal prediction errors."""
         values = np.asarray(errors, dtype=np.float64).reshape(-1)
         values = values[np.isfinite(values)]
         if values.size == 0:
             raise ValueError("Cannot calibrate: no finite prediction errors were collected")
 
+        n = int(values.size)
         mean_error = float(np.mean(values))
         std_error = float(np.std(values))
         median_error = float(np.median(values))
-        p95 = float(np.percentile(values, self.percentile))
+        mad = float(np.median(np.abs(values - median_error)))
+        normal_scale_mad = 1.4826 * mad
+
+        effective_pctl = (1.0 - target_fpr) * 100.0 if target_fpr is not None else self.percentile
         threshold_std = mean_error + self.k_std * std_error
-        threshold_percentile = float(np.percentile(values, self.percentile))
+        threshold_percentile = float(np.percentile(values, effective_pctl))
+        threshold_mad = median_error + self.k_std * normal_scale_mad
+
+        # Conformal quantile: level = min(1.0, ceil((n + 1) * (1 - alpha)) / n)
+        alpha = target_fpr if target_fpr is not None else (1.0 - self.percentile / 100.0)
+        conf_level = min(1.0, max(0.0, float(np.ceil((n + 1) * (1.0 - alpha)) / n)))
+        threshold_conformal = float(np.quantile(values, conf_level))
 
         if method == "percentile":
             threshold = threshold_percentile
+        elif method == "mad":
+            threshold = threshold_mad
+        elif method == "conformal":
+            threshold = threshold_conformal
         else:
             threshold = threshold_std
 
@@ -102,19 +152,23 @@ class AnomalyCalibrator:
             "mean_error": mean_error,
             "std_error": std_error,
             "median_error": median_error,
-            "p95_error": p95,
+            "mad_error": mad,
+            "p95_error": float(np.percentile(values, 95.0)),
             "threshold": threshold,
             "threshold_std": threshold_std,
             "threshold_percentile": threshold_percentile,
+            "threshold_mad": threshold_mad,
+            "threshold_conformal": threshold_conformal,
             "k_std": self.k_std,
-            "percentile": self.percentile,
-            "num_samples": int(values.size),
+            "percentile": effective_pctl,
+            "target_fpr": alpha,
+            "num_samples": n,
             "method": method,
         }
 
         logger.info(
-            "Calibration: mean=%.6f std=%.6f threshold=%.6f (method=%s, threshold_std=%.6f, threshold_p%.1f=%.6f)",
-            mean_error, std_error, threshold, method, threshold_std, self.percentile, threshold_percentile,
+            "Calibration: mean=%.6f std=%.6f threshold=%.6f (method=%s, threshold_std=%.6f, threshold_p%.1f=%.6f, threshold_conf=%.6f)",
+            mean_error, std_error, threshold, method, threshold_std, effective_pctl, threshold_percentile, threshold_conformal,
         )
         return calibration_info
 

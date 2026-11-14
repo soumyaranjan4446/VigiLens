@@ -144,3 +144,29 @@ def test_evaluate_manifest_modality_option(tiny_model, make_cache, tmp_path):
     assert rgb_res["modality"] == "rgb"
     assert ir_res["modality"] == "ir"
     assert rgb_res["per_video"][0]["mean_raw_score"] != ir_res["per_video"][0]["mean_raw_score"]
+
+
+def test_evaluate_manifest_norm_mse_score_variant(tiny_model, make_cache, tmp_path):
+    cache = make_cache(tmp_path / "cache" / "pair.pt", num_frames=6, has_ir=True, labels=[0] * 6)
+    manifest = _write_manifest(tmp_path / "manifest.json", [
+        {"sequence_id": "pair", "rgb": "pair_rgb.mp4", "cache": str(cache)},
+    ])
+    calibration = tmp_path / "calibration.json"
+    diag_var = [1.0 + 0.01 * i for i in range(512)]
+    with open(calibration, "w", encoding="utf-8") as handle:
+        json.dump({
+            "threshold": 1.5,
+            "score_variant": "norm_mse",
+            "diag_variance": diag_var,
+        }, handle)
+
+    res = evaluate_manifest(
+        tiny_model,
+        manifest,
+        output_dir=tmp_path / "res_norm_mse",
+        calibration_path=calibration,
+        device="cpu",
+    )
+    assert res["score_variant"] == "norm_mse"
+    assert res["threshold"] == 1.5
+    assert res["num_frames"] == 6

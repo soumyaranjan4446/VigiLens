@@ -21,6 +21,26 @@ def test_compute_threshold_statistics(tiny_model):
     assert info["method"] == "std"
 
 
+def test_compute_threshold_methods(tiny_model):
+    calibrator = AnomalyCalibrator(tiny_model, k_std=1.0, percentile=75.0)
+    data = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+
+    # Percentile
+    info_p = calibrator.compute_threshold(data, method="percentile")
+    assert info_p["threshold"] == info_p["threshold_percentile"]
+    assert info_p["method"] == "percentile"
+
+    # MAD
+    info_mad = calibrator.compute_threshold(data, method="mad")
+    assert info_mad["threshold"] == info_mad["threshold_mad"]
+    assert info_mad["method"] == "mad"
+
+    # Conformal
+    info_conf = calibrator.compute_threshold(data, method="conformal", target_fpr=0.25)
+    assert info_conf["threshold"] == info_conf["threshold_conformal"]
+    assert info_conf["method"] == "conformal"
+
+
 def test_compute_threshold_rejects_empty_or_non_finite(tiny_model):
     calibrator = AnomalyCalibrator(tiny_model)
     for values in ([], [float("nan"), float("inf")]):
@@ -81,3 +101,11 @@ def test_calibrate_model_writes_json(tiny_model, make_cache, tmp_path):
     assert saved == info
     assert saved["num_samples"] == 7
     assert saved["k_std"] == 2.0
+
+
+def test_compute_residual_variance(tiny_model, make_cache, tmp_path):
+    cache = make_cache(tmp_path / "cache" / "val.pt", num_frames=8, has_ir=True)
+    calibrator = AnomalyCalibrator(tiny_model)
+    var = calibrator.compute_residual_variance([cache], device="cpu")
+    assert var.shape == (512,)
+    assert (var > 0).all()

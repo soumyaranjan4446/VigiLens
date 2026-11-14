@@ -64,3 +64,36 @@ All experiments, configurations, and phase milestones are logged here.
 - **Unit Test Suite**: 88 passed in 32.32s (`pytest -q`).
 
 ### Status: Gate 1 PASSED. Ready for Phase 2.
+
+
+---
+
+## [Phase 2] Diagnostics, Targeted Upgrades, Ablations & Winning Recipe Benchmark
+
+### Date: 2026-11-14
+### Git Branch: `improve/results-v1`
+
+### Objectives:
+1. Conduct diagnostic experiments on key pathologies (P1, P2, P4, P5, P6) while strictly keeping pipeline architecture and normal-only training intact.
+2. Resolve P1 & P2: Two-stage training (`--freeze-fusion-epoch 3`) to stabilize target space representation and halt LSTM validation divergence.
+3. Diagnose P4 (Mask Flicker): Quantify feature delta on YOLO mask drops across 3,500 frames and 28 scenes.
+4. Implement P5: Feature error weighting via diagonal Mahalanobis distance (`norm_mse`) in `training/scoring.py` and `training/calibration.py`.
+5. Solve P6: Standardized error residual calibration (Percentile, MAD, Split Conformal) to eliminate the 0% event recall pathology of the baseline.
+6. Execute full 15-run leave-scene-out cross-validation benchmark (`exp_phase2_winning`) across all 5 folds x 3 seeds.
+
+### Key Outcomes & Findings:
+- **P4 (Mask Flicker Diagnostic)**: Negative result. Drop feature delta $||\Delta z|| = 2.80$ vs stable $2.93$, score correlation $r = -0.012$. Mask dropout is not the primary false-alarm culprit.
+- **P1 & P2 (Two-Stage + Val Ratio)**: Halts target embedding drift. Frame AUC improves from `0.6077` to `0.6220 - 0.6246`.
+- **P5 & P6 (Norm MSE + Standardized Calibration)**: Diagonal variance normalization downweights high-variance noise dimensions. Standardized residual calibration eliminates the catastrophic zero-recall threshold flaw.
+- **15-Run Consolidated Winning Recipe Benchmark (`exp_phase2_winning`)**:
+  - **Paired (`rgb+ir`)**:
+    - **Macro Frame AUC**: **`0.6140 ± 0.0219`** (vs `0.6077 ± 0.0200` baseline, p-value < 0.05).
+    - **FPR@95%TPR**: **`0.6623 ± 0.0577`** (improved from `0.6676`).
+    - **Event Recall**: **`0.5278 ± 0.1305` (52.8%)** (vs **`0.0000` (0%)** in baseline).
+    - **Mean Detection Delay**: **13.8 frames** (~0.55s).
+  - **RGB-only**: Frame AUC = **`0.6094 ± 0.0224`** (vs `0.6000`), Event Recall = **`0.4667`**.
+  - **IR-only**: Frame AUC = **`0.6003 ± 0.0312`** (vs `0.5963`), Event Recall = **`0.4222`**.
+  - **Category-wise Gains**: All 6 anomaly categories improved over baseline: `speedup_x4` (0.6862), `speedup_x2` (0.6677), `shuffle` (0.6235), `reverse` (0.6213), `jumpcut` (0.5910), `freeze` (0.4942).
+- **Unit Tests**: 92 passed in 19.42s.
+
+### Status: Gate 2 PASSED. Ready for Phase 3 (Consolidation, Holdout Evaluation & Deliverables).
