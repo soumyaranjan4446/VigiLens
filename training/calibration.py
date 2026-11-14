@@ -79,7 +79,7 @@ class AnomalyCalibrator:
             "or use `--cache-dir`."
         )
 
-    def compute_threshold(self, errors: Sequence[float]) -> Dict:
+    def compute_threshold(self, errors: Sequence[float], method: str = "std") -> Dict:
         """Compute calibration statistics from normal prediction errors."""
         values = np.asarray(errors, dtype=np.float64).reshape(-1)
         values = values[np.isfinite(values)]
@@ -93,23 +93,28 @@ class AnomalyCalibrator:
         threshold_std = mean_error + self.k_std * std_error
         threshold_percentile = float(np.percentile(values, self.percentile))
 
+        if method == "percentile":
+            threshold = threshold_percentile
+        else:
+            threshold = threshold_std
+
         calibration_info = {
             "mean_error": mean_error,
             "std_error": std_error,
             "median_error": median_error,
             "p95_error": p95,
-            "threshold": threshold_std,
+            "threshold": threshold,
             "threshold_std": threshold_std,
             "threshold_percentile": threshold_percentile,
             "k_std": self.k_std,
             "percentile": self.percentile,
             "num_samples": int(values.size),
-            "method": "std",
+            "method": method,
         }
 
         logger.info(
-            "Calibration: mean=%.6f std=%.6f threshold_std=%.6f threshold_p%.1f=%.6f",
-            mean_error, std_error, threshold_std, self.percentile, threshold_percentile,
+            "Calibration: mean=%.6f std=%.6f threshold=%.6f (method=%s, threshold_std=%.6f, threshold_p%.1f=%.6f)",
+            mean_error, std_error, threshold, method, threshold_std, self.percentile, threshold_percentile,
         )
         return calibration_info
 
@@ -135,11 +140,12 @@ def calibrate_model(model,
                     device: Optional[str] = None,
                     checkpoint_dir: str = "checkpoints",
                     k_std: float = 3.0,
-                    percentile: float = 95.0) -> Dict:
+                    percentile: float = 95.0,
+                    method: str = "std") -> Dict:
     """Calibrate a model from cache files and save ``calibration.json``."""
     calibrator = AnomalyCalibrator(model, k_std=k_std, percentile=percentile)
     errors = calibrator.collect_errors(val_videos, val_ir_videos, device=device)
-    calibration_info = calibrator.compute_threshold(errors)
+    calibration_info = calibrator.compute_threshold(errors, method=method)
     calibrator.save_calibration(
         calibration_info, Path(checkpoint_dir) / "calibration.json"
     )

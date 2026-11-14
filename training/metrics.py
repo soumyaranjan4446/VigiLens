@@ -137,6 +137,144 @@ def compute_binary_metrics(labels,
     }
 
 
-def compute_video_metrics(video_labels, video_scores) -> Dict[str, float]:
+def compute_video_metrics(video_labels,
+                          video_scores,
+                          threshold: Optional[float] = None) -> Dict[str, float]:
     """Compute AUC/AP using one maximum score per video."""
-    return compute_binary_metrics(video_labels, video_scores)
+    return compute_binary_metrics(video_labels, video_scores, threshold=threshold)
+
+
+def compute_event_metrics(segments_per_video: Sequence[Sequence[Sequence[int]]],
+                          scores_per_video: Sequence[np.ndarray],
+                          threshold: float) -> Dict[str, Any]:
+    """
+    Compute event-level recall and mean detection delay in frames.
+
+    An anomalous segment [start, end) counts as detected if any frame inside
+    the segment reaches or exceeds the threshold.  The detection delay is the
+    difference between the first flagged frame and the segment start.
+
+    Args:
+        segments_per_video: For each video, a list of [start, end] intervals.
+        scores_per_video: For each video, a 1-D array of anomaly scores.
+        threshold: Operating decision threshold.
+
+    Returns:
+        Dictionary with num_events, num_detected, event_recall, and mean_delay_frames.
+    """
+    total_events = 0
+    detected_events = 0
+    delays: List[int] = []
+
+    for segments, scores in zip(segments_per_video, scores_per_video):
+        scores = np.asarray(scores, dtype=np.float64).reshape(-1)
+        for seg in segments:
+            if len(seg) != 2:
+                continue
+            start, end = int(seg[0]), int(seg[1])
+            start = max(0, start)
+            end = min(scores.size, end)
+            if end <= start:
+                continue
+
+            total_events += 1
+            seg_scores = scores[start:end]
+            flagged = np.where(seg_scores >= threshold)[0]
+            if flagged.size > 0:
+                detected_events += 1
+                delay = int(flagged[0])  # Frame offset from start
+                delays.append(delay)
+
+    event_recall = float(detected_events / max(total_events, 1)) if total_events > 0 else float("nan")
+    mean_delay = float(np.mean(delays)) if delays else float("nan")
+
+    return {
+        "num_events": total_events,
+        "num_detected": detected_events,
+        "event_recall": event_recall,
+        "mean_delay_frames": mean_delay,
+    }
+
+
+def compute_false_alarm_rate(normal_scores: np.ndarray,
+                             threshold: float,
+                             fps: float = 25.0) -> Dict[str, float]:
+    """
+    Compute frame false-positive rate and false alarms per hour on normal video.
+
+    Args:
+        normal_scores: 1-D array of scores on normal frames.
+        threshold: Operating decision threshold.
+        fps: Video frame rate (default: 25.0 fps for VidLLVIP).
+
+    Returns:
+        Dictionary with normal_frames, false_alarm_frames, frame_fpr, and false_alarms_per_hour.
+    """
+    scores = np.asarray(normal_scores, dtype=np.float64).reshape(-1)
+    if scores.size == 0:
+        return {
+            "normal_frames": 0,
+            "false_alarm_frames": 0,
+            "frame_fpr": float("nan"),
+            "false_alarms_per_hour": float("nan"),
+        }
+
+    flags = int(np.sum(scores >= threshold))
+    fps = max(float(fps), 1.0)
+    total_hours = (scores.size / fps) / 3600.0
+    fa_per_hour = float(flags / max(total_hours, 1e-6))
+    frame_fpr = float(flags / scores.size)
+
+    return {
+        "normal_frames": int(scores.size),
+        "false_alarm_frames": flags,
+        "frame_fpr": frame_fpr,
+        "false_alarms_per_hour": fa_per_hour,
+    }
+
+
+def bootstrap_video_metric(per_video_labels: Sequence[np.ndarray],
+                           per_video_scores: Sequence[np.ndarray],
+                           metric_name: str = "auc",
+                           threshold: Optional[float] = None,
+                           num_bootstraps: int = 500,
+                           ci: float = 0.95,
+                           seed: int = 42) -> Dict[str, float]:
+    """
+    Compute cluster bootstrap confidence intervals resampling over whole videos.
+
+    Avoids over-optimistic i.i.d. frame assumptions across correlated frames of the same video.
+    """
+    n_vids = len(per_video_labels)
+    if n_vids == 0:
+        return {"point_estimate": float("nan"), "ci_lower": float("nan"), "ci_upper": float("nan")}
+
+    # Point estimate
+    all_l = np.concatenate(per_video_labels)
+    all_s = np.concatenate(per_video_scores)
+    point = compute_binary_metrics(all_l, all_s, threshold=threshold).get(metric_name, float("nan"))
+
+    rng = np.random.default_rng(seed)
+    boot_vals: List[float] = []
+
+    for _ in range(num_bootstraps):
+        sampled_indices = rng.choice(n_vids, size=n_vids, replace=True)
+        samp_labels = np.concatenate([per_video_labels[i] for i in sampled_indices])
+        samp_scores = np.concatenate([per_video_scores[i] for i in sampled_indices])
+        res = compute_binary_metrics(samp_labels, samp_scores, threshold=threshold)
+        val = res.get(metric_name, float("nan"))
+        if np.isfinite(val):
+            boot_vals.append(float(val))
+
+    if not boot_vals:
+        return {"point_estimate": point, "ci_lower": float("nan"), "ci_upper": float("nan")}
+
+    alpha = (1.0 - ci) / 2.0
+    lower = float(np.percentile(boot_vals, 100.0 * alpha))
+    upper = float(np.percentile(boot_vals, 100.0 * (1.0 - alpha)))
+
+    return {
+        "point_estimate": point,
+        "ci_lower": lower,
+        "ci_upper": upper,
+    }

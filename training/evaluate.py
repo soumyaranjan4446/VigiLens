@@ -48,7 +48,12 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 import numpy as np
 import torch
 
-from training.metrics import compute_binary_metrics, compute_video_metrics
+from training.metrics import (
+    compute_binary_metrics,
+    compute_event_metrics,
+    compute_false_alarm_rate,
+    compute_video_metrics,
+)
 from training.scoring import read_cache_metadata, score_cache_file
 from training.utils import safe_stem
 
@@ -262,7 +267,62 @@ def evaluate_manifest(model,
     video_metrics = compute_video_metrics(
         [video["label"] for video in per_video],
         [video["max_smoothed_score"] if smoothing_window > 1 else video["max_raw_score"] for video in per_video],
+        threshold=threshold,
     )
+
+    # Event-level metrics
+    segments_per_vid = [entry.get("segments") or [] for entry in entries]
+    event_metrics = compute_event_metrics(
+        segments_per_vid,
+        all_smoothed if smoothing_window > 1 else all_raw,
+        threshold=threshold,
+    )
+
+    # False alarms on normal frames
+    normal_mask = (labels == 0)
+    normal_scores = primary_scores[normal_mask]
+    fa_metrics = compute_false_alarm_rate(normal_scores, threshold=threshold, fps=25.0)
+
+    # Disaggregated breakdowns by scene and by anomaly type
+    by_scene: Dict[str, Dict[str, Any]] = {}
+    by_type: Dict[str, Dict[str, Any]] = {}
+
+    for idx, entry in enumerate(entries):
+        sid = str(entry.get("sequence_id", per_video[idx]["sequence_id"]))
+        scene_id = sid.split("_")[0]
+        anom_type = entry.get("anomaly_type", "anomaly" if per_video[idx]["label"] == 1 else "normal")
+
+        by_scene.setdefault(scene_id, {"labels": [], "scores": []})
+        by_scene[scene_id]["labels"].append(all_labels[idx])
+        by_scene[scene_id]["scores"].append(all_smoothed[idx] if smoothing_window > 1 else all_raw[idx])
+
+        by_type.setdefault(anom_type, {"labels": [], "scores": []})
+        by_type[anom_type]["labels"].append(all_labels[idx])
+        by_type[anom_type]["scores"].append(all_smoothed[idx] if smoothing_window > 1 else all_raw[idx])
+
+    scene_breakdown = {}
+    for sc, data in by_scene.items():
+        sc_l = np.concatenate(data["labels"])
+        sc_s = np.concatenate(data["scores"])
+        scene_breakdown[sc] = compute_binary_metrics(sc_l, sc_s, threshold=threshold)
+
+    type_breakdown = {}
+    type_aucs = []
+    for tp, data in by_type.items():
+        tp_l = np.concatenate(data["labels"])
+        tp_s = np.concatenate(data["scores"])
+        if tp != "normal" and np.any(normal_mask):
+            tp_anom_s = tp_s[tp_l == 1]
+            comb_l = np.concatenate([np.zeros_like(normal_scores, dtype=np.int64), np.ones_like(tp_anom_s, dtype=np.int64)])
+            comb_s = np.concatenate([normal_scores, tp_anom_s])
+            m = compute_binary_metrics(comb_l, comb_s, threshold=threshold)
+            type_breakdown[tp] = m
+            if np.isfinite(m["auc"]):
+                type_aucs.append(m["auc"])
+        else:
+            type_breakdown[tp] = compute_binary_metrics(tp_l, tp_s, threshold=threshold)
+
+    macro_frame_auc = float(np.mean(type_aucs)) if type_aucs else metrics.get("auc", float("nan"))
 
     summary = {
         "manifest": str(manifest_path),
@@ -279,6 +339,11 @@ def evaluate_manifest(model,
         "metrics_smoothed": metrics_smoothed,
         "metrics_at_best_f1_threshold": best_metrics,
         "video_metrics": video_metrics,
+        "event_metrics": event_metrics,
+        "false_alarm_rate": fa_metrics,
+        "by_scene": scene_breakdown,
+        "by_anomaly_type": type_breakdown,
+        "macro_frame_auc": macro_frame_auc,
         "per_video": per_video,
         "notes": (
             "AUC/AP are NaN when the evaluation set contains only one class. "

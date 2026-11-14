@@ -59,3 +59,20 @@ To eliminate all leakage across model selection, threshold calibration, and test
 - `Calib ∩ Test` = `{14} ∩ {09, 13}` = ∅
 
 All intersections are provably empty. Zero data leakage at the scene level.
+
+---
+
+## 3. 5-Fold Grouped Leave-Scene-Out Cross Validation Schedule
+
+To tune and evaluate models strictly without touching the frozen final holdout (`scenes 09, 13`), K=5 folds are defined across the remaining 12 scenes (`experiments/splits/folds.json`).
+
+| Fold ID | Test Scenes (Held-out) | Calibration Scene | Validation Scene (Selection) | Training Scenes (Fit) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Fold 0** | `01`, `02` | `03` | `04` | `05`, `06`, `07`, `08`, `10`, `11`, `12`, `14` |
+| **Fold 1** | `03`, `04` | `05` | `06` | `01`, `02`, `07`, `08`, `10`, `11`, `12`, `14` |
+| **Fold 2** | `05`, `06` | `07` | `08` | `01`, `02`, `03`, `04`, `10`, `11`, `12`, `14` |
+| **Fold 3** | `07`, `08` | `10` | `11` | `01`, `02`, `03`, `04`, `05`, `06`, `12`, `14` |
+| **Fold 4** | `10`, `11` | `12` | `14` | `01`, `02`, `03`, `04`, `05`, `06`, `07`, `08` |
+
+- **Frozen Final Holdout**: Scenes `09` and `13` (114 clips total) remain 100% untouched across all 5 folds.
+- **Audit Verification**: Every fold satisfies `Train ∩ Val ∩ Calib ∩ Test ∩ Holdout = ∅` as audited by `scripts/audit_splits.py`.

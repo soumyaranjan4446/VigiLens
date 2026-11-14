@@ -52,6 +52,11 @@ def test_evaluate_manifest_writes_scores_and_results(tiny_model, make_cache, tmp
     assert result["per_video"][1]["label"] == 1
     assert "metrics_raw" in result and "metrics_smoothed" in result
     assert "metrics_at_best_f1_threshold" in result
+    assert "event_metrics" in result
+    assert "false_alarm_rate" in result
+    assert "macro_frame_auc" in result
+    assert "by_scene" in result
+    assert "by_anomaly_type" in result
 
     scores_path = output_dir / "scores.csv"
     results_path = output_dir / "results.json"

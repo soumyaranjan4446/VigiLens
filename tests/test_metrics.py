@@ -4,7 +4,13 @@ import math
 
 import numpy as np
 
-from training.metrics import compute_binary_metrics, compute_video_metrics
+from training.metrics import (
+    bootstrap_video_metric,
+    compute_binary_metrics,
+    compute_event_metrics,
+    compute_false_alarm_rate,
+    compute_video_metrics,
+)
 
 
 def test_perfect_separation():
@@ -87,3 +93,47 @@ def test_video_metrics_use_one_score_per_video():
     metrics = compute_video_metrics([0, 0, 1, 1], [0.1, 0.2, 0.8, 0.9])
     assert metrics["auc"] == 1.0
     assert metrics["num_frames"] == 4
+
+
+def test_compute_event_metrics_hand_computed():
+    # Video 1: segment [10, 20). Flagged at index 12 -> delay = 2 frames.
+    scores1 = np.zeros(30)
+    scores1[12] = 0.8
+    scores1[15] = 0.9
+
+    # Video 2: segment [5, 15). Never reaches threshold 0.5.
+    scores2 = np.zeros(25)
+    scores2[8] = 0.3
+
+    res = compute_event_metrics(
+        segments_per_video=[[[10, 20]], [[5, 15]]],
+        scores_per_video=[scores1, scores2],
+        threshold=0.5,
+    )
+
+    assert res["num_events"] == 2
+    assert res["num_detected"] == 1
+    assert res["event_recall"] == 0.5
+    assert res["mean_delay_frames"] == 2.0
+
+
+def test_compute_false_alarm_rate_hand_computed():
+    normal_scores = np.zeros(100)
+    normal_scores[:4] = 0.6  # 4 false alarms above 0.5
+    res = compute_false_alarm_rate(normal_scores, threshold=0.5, fps=25.0)
+
+    assert res["normal_frames"] == 100
+    assert res["false_alarm_frames"] == 4
+    assert res["frame_fpr"] == 0.04
+    # (100 / 25) / 3600 = 4 / 3600 hr -> 4 / (4 / 3600) = 3600 fa/hr
+    assert math.isclose(res["false_alarms_per_hour"], 3600.0)
+
+
+def test_bootstrap_video_metric():
+    labels = [np.array([0, 0, 1, 1]), np.array([0, 1])]
+    scores = [np.array([0.1, 0.2, 0.8, 0.9]), np.array([0.2, 0.7])]
+    res = bootstrap_video_metric(labels, scores, metric_name="auc", num_bootstraps=50, seed=42)
+
+    assert np.isfinite(res["point_estimate"])
+    assert res["ci_lower"] <= res["point_estimate"] <= res["ci_upper"]
+

@@ -57,3 +57,29 @@ def test_generate_splits_markdown():
     md = generate_splits_markdown(result)
     assert "PASSED (Zero Leakage)" in md
     assert "| `train` | 1 | 1 | `01` |" in md
+
+
+def test_folds_json_disjointness():
+    import json
+    from pathlib import Path
+    folds_path = Path("experiments/splits/folds.json")
+    if not folds_path.exists():
+        pytest.skip("experiments/splits/folds.json not yet created")
+
+    with open(folds_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    holdout = data["frozen_holdout"]
+    assert len(holdout) > 0
+
+    for fold in data["folds"]:
+        splits = {
+            "train": [f"{s}_0000" for s in fold["train"]],
+            "val": [f"{s}_0000" for s in fold["val"]],
+            "calib": [f"{s}_0000" for s in fold["calib"]],
+            "test": [f"{s}_0000" for s in fold["test"]],
+            "holdout": [f"{s}_0000" for s in holdout],
+        }
+        res = audit_splits(splits, fail_on_overlap=True)
+        assert res["passed"] is True
+        assert len(res["overlaps"]) == 0

@@ -38,3 +38,29 @@ All experiments, configurations, and phase milestones are logged here.
   - Detection quality (AUC/AP/F1): NaN due to zero labeled anomalies in test set (Problem P7 confirmed).
 
 ### Status: Gate 0 PASSED. Ready for Phase 1.
+
+---
+
+## [Phase 1] Trustworthy Evaluation Protocol & Re-benchmark (`baseline_v0`)
+
+### Date: 2026-11-14
+### Git Branch: `improve/results-v1`
+
+### Objectives:
+1. Define 5 leave-scene-out cross validation folds over 12 scenes (`01..08, 10, 11, 12, 14`) with 4-way disjoint partitioning (`train`, `val`, `calib`, `test`). Scenes `09` and `13` strictly frozen for final holdout testing.
+2. Implement leakage-free pseudo-anomaly generation (`scripts/make_pseudo_anomalies.py`) supporting Tier A (`reverse`, `speedup_x2`, `speedup_x4`, `freeze`, `shuffle`, `jumpcut`) and Tier B.
+3. Extend evaluation and metric suites (`training/metrics.py`, `training/evaluate.py`) to compute macro frame AUC, AP, FPR@95%TPR, event recall, detection delay, and false alarms per hour.
+4. Implement unified leave-scene-out experiment runner (`experiments/run_experiment.py`) and statistical summarizer (`experiments/summarize.py`).
+5. Re-benchmark unmodified baseline recipe (`baseline_v0`: `val_loss` selection, `1e-5` weight decay, zero input noise, `mean + 3*std` calibration) across all 5 folds $\times$ 3 seeds (15 runs).
+
+### Key Outcomes & Findings:
+- **Disjoint Partitioning Verified**: Zero scene leakage across all 5 folds and frozen holdout (`pytest tests/test_audit_splits.py`).
+- **Baseline Re-benchmark (`baseline_v0` across 15 runs)**:
+  - **Paired (`rgb+ir`)**: Macro Frame AUC = `0.6077 ± 0.0200`, Frame AP = `0.3230 ± 0.0422`, FPR@95%TPR = `0.6676 ± 0.0503`.
+  - **RGB-only**: Macro Frame AUC = `0.6000 ± 0.0207`, Frame AP = `0.3145 ± 0.0314`, FPR@95%TPR = `0.6923 ± 0.0408`.
+  - **IR-only**: Macro Frame AUC = `0.5963 ± 0.0267`, Frame AP = `0.3119 ± 0.0373`, FPR@95%TPR = `0.6791 ± 0.0683`.
+  - **Multimodal Synergy Confirmed**: Paired `rgb+ir` outperforms unimodal across all folds.
+  - **Pathology P6 Empirically Confirmed**: Due to heavy-tailed error residuals driving `mean + 3*std` threshold to $\sim 1.40$, Event Recall is `0.0000` (0%) across all 15 runs.
+- **Unit Test Suite**: 88 passed in 32.32s (`pytest -q`).
+
+### Status: Gate 1 PASSED. Ready for Phase 2.
