@@ -1,0 +1,13 @@
+{
+  "name": "production_split",
+  "notes": "Consolidated training on development scenes 01-08, 10, 11; val on 12; calib on 14; single final evaluation on frozen holdout 09, 13.",
+  "folds": [
+    {
+      "fold_id": 0,
+      "train": ["01", "02", "03", "04", "05", "06", "07", "08", "10", "11"],
+      "val": ["12"],
+      "calib": ["14"],
+      "test": ["09", "13"]
+    }
+  ]
+}

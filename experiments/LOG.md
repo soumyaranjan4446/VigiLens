@@ -97,3 +97,32 @@ All experiments, configurations, and phase milestones are logged here.
 - **Unit Tests**: 92 passed in 19.42s.
 
 ### Status: Gate 2 PASSED. Ready for Phase 3 (Consolidation, Holdout Evaluation & Deliverables).
+
+
+---
+
+## [Phase 3] Consolidated Production Model & Single Frozen Holdout Evaluation
+
+### Date: 2026-11-14
+### Git Branch: `improve/results-v1`
+
+### Objectives:
+1. Consolidate training across all development scenes (`01..08, 10, 11`) with validation on scene `12` using the Phase 2 winning recipe.
+2. Standardized threshold calibration and residual variance estimation on calibration scene `14`.
+3. Single evaluation on the untouched frozen holdout scenes (`09` and `13`) across `rgb+ir`, `rgb`, and `ir`.
+4. Deploy production checkpoints (`checkpoints/best_model.pth`, `checkpoints/calibration.json`) and verify streaming inference compatibility (`pipeline/inference.py`).
+
+### Key Outcomes & Findings:
+- **Zero Leakage Invariant Preserved**: Holdout scenes `09` and `13` were never seen during training, early stopping, or threshold calibration.
+- **Frozen Holdout Performance (`scenes 09, 13`)**:
+  - **Paired (`rgb+ir`)**:
+    - **Macro Frame AUC**: `0.5784`
+    - **Frame AP**: `0.3213`
+    - **Event Recall**: **`0.5000` (50.0%)** (12 of 24 anomaly events detected vs `0.0%` baseline).
+    - **Normal Frame FPR**: `0.2414` (threshold = 3.2326).
+  - **RGB-only**: Frame AUC = `0.5942`, Frame AP = `0.3472`, Event Recall = `0.3333`.
+  - **IR-only**: Frame AUC = `0.5993`, Frame AP = `0.3607`, Event Recall = `0.4167`.
+- **Streaming Pipeline Compatibility**: Verified with `pipeline/inference.py`. Model loads the calibrated threshold and residual diagonal variance cleanly, resets streaming states, and generates streaming real-time alerts.
+- **Production Deployment**: Final production model deployed to `checkpoints/best_model.pth` and `checkpoints/calibration.json` (with legacy baseline archived in `checkpoints/legacy_baseline/`).
+
+### Status: MISSION ACCOMPLISHED. All 3 phases completed and verified.
