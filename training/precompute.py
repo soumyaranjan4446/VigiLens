@@ -170,6 +170,7 @@ def precompute_pair(rgb_path: Union[str, Path],
     ir_features: List[np.ndarray] = []
     frame_indices: List[int] = []
     labels: List[int] = []
+    person_found: List[bool] = []
     has_ir = ir_cap is not None
     input_index = 0
     batch_frames_rgb: List[np.ndarray] = []
@@ -184,6 +185,12 @@ def precompute_pair(rgb_path: Union[str, Path],
         masks = None
         if segmentation is not None:
             masks = segmentation.extract_person_masks(batch_frames_rgb)
+
+        if masks is not None:
+            found = [bool(m is not None and np.any(m > 0)) for m in masks]
+        else:
+            found = [False] * len(batch_frames_rgb)
+        person_found.extend(found)
 
         rgb_feats = rgb_extractor.extract_batch(batch_frames_rgb, masks)
         rgb_features.extend(list(rgb_feats))
@@ -262,6 +269,9 @@ def precompute_pair(rgb_path: Union[str, Path],
         if ir_tensor is not None:
             ir_tensor = ir_tensor.half()
 
+    person_found_tensor = torch.tensor(person_found, dtype=torch.bool)
+    person_found_fraction = float(sum(person_found) / max(len(person_found), 1))
+
     data = {
         "rgb_features": rgb_tensor,
         "ir_features": ir_tensor,
@@ -270,6 +280,7 @@ def precompute_pair(rgb_path: Union[str, Path],
         "fps": float(fps),
         "frame_indices": frame_indices,
         "labels": torch.tensor(labels, dtype=torch.int64) if labels else None,
+        "person_found": person_found_tensor,
         "source_rgb": str(rgb_path),
         "source_ir": str(ir_path) if ir_path is not None else None,
         "frame_stride": frame_stride,
@@ -283,6 +294,7 @@ def precompute_pair(rgb_path: Union[str, Path],
         "num_frames": int(rgb_tensor.shape[0]),
         "has_ir": bool(has_ir),
         "fps": float(fps),
+        "person_found_fraction": person_found_fraction,
         "source_rgb": str(rgb_path),
         "source_ir": str(ir_path) if ir_path is not None else None,
         "frame_stride": frame_stride,

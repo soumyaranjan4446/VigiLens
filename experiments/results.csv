@@ -1,0 +1,4 @@
+experiment_id,phase,modality,seed,fold,git_commit,select_metric,threshold_method,threshold,frame_auc,frame_ap,best_f1,operating_f1,fpr_at_95tpr,normal_frame_fpr_smoothed,normal_frame_fpr_raw,normal_video_fpr_smoothed,normal_video_fpr_raw,false_alarms_per_hour,notes
+baseline_paired,phase0,rgb+ir,42,held_out_09_13,ae9c16a,val_loss,mean+3std,0.509681,NaN,NaN,NaN,0.0000,NaN,0.0418,0.0574,0.5965,0.7632,3764.21,Baseline VidLLVIP 30-epoch run (P1 epoch-1 selection, P8 scene 13 leakage)
+baseline_rgb_only,phase0,rgb,42,held_out_09_13,ae9c16a,val_loss,mean+3std,0.509681,NaN,NaN,NaN,0.0000,NaN,0.0204,0.0521,0.3596,0.7632,1831.58,Baseline RGB-only evaluation on paired threshold
+baseline_ir_only,phase0,ir,42,held_out_09_13,ae9c16a,val_loss,mean+3std,0.509681,NaN,NaN,NaN,0.0000,NaN,0.0108,0.0500,0.3246,0.7632,972.63,Baseline IR-only evaluation on paired threshold

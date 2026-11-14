@@ -109,7 +109,6 @@ results/
 outputs/
 output/
 runs/
-experiments/
 artifacts/
 tmp/
 temp/
@@ -178,6 +177,7 @@ docker-compose.override.yml
 training.npy
 *.mat
 *.csv
+!experiments/**/*.csv
 !checkpoints/calibration.json
 !requirements.txt
 !package.json

@@ -67,6 +67,50 @@ def test_precompute_pair_writes_cache_and_sidecar(make_video, tmp_path):
     sidecar = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
     assert sidecar["num_frames"] == 6
     assert sidecar["has_ir"] is True
+    assert "person_found" in data
+    assert data["person_found"].shape == (6,)
+    assert "person_found_fraction" in sidecar
+    assert sidecar["person_found_fraction"] == 0.0
+
+
+class FakeSegmentation:
+    """Mock segmentation returning person mask on every second frame."""
+
+    def extract_person_masks(self, frames):
+        masks = []
+        for i, frame in enumerate(frames):
+            if i % 2 == 0:
+                mask = np.ones(frame.shape[:2], dtype=np.uint8)
+                masks.append(mask)
+            else:
+                masks.append(None)
+        return masks
+
+
+def test_precompute_pair_records_person_found(make_video, tmp_path):
+    rgb = make_video(tmp_path / "seq_rgb.avi", num_frames=4)
+    output = tmp_path / "cache"
+
+    path = precompute_pair(
+        rgb,
+        None,
+        output,
+        segmentation=FakeSegmentation(),
+        rgb_extractor=FakeExtractor(seed=1),
+        ir_extractor=FakeExtractor(seed=2),
+        batch_size=2,
+        sequence_id="seq_person",
+    )
+
+    data = torch.load(path, map_location="cpu", weights_only=True)
+    assert "person_found" in data
+    assert data["person_found"].shape == (4,)
+    # Batch size 2: batch 0 gets frames [0, 1] -> [True, False], batch 1 gets frames [0, 1] -> [True, False]
+    assert data["person_found"].sum().item() > 0
+
+    sidecar = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    assert "person_found_fraction" in sidecar
+    assert 0.0 < sidecar["person_found_fraction"] <= 1.0
 
 
 def test_precompute_pair_skips_existing_unless_overwrite(make_video, tmp_path):

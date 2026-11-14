@@ -52,6 +52,7 @@ def make_cache(tmp_path):
         if labels is not None:
             label_tensor = torch.tensor(labels, dtype=torch.int64)
         sequence_id = sequence_id or path.stem
+        person_found = torch.ones(num_frames, dtype=torch.bool)
         data = {
             "rgb_features": rgb,
             "ir_features": ir,
@@ -60,6 +61,7 @@ def make_cache(tmp_path):
             "fps": 20.0,
             "frame_indices": list(range(num_frames)),
             "labels": label_tensor,
+            "person_found": person_found,
             "source_rgb": f"{sequence_id}_rgb.mp4",
             "source_ir": f"{sequence_id}_ir.mp4" if has_ir else None,
             "dtype": "float32",
@@ -70,6 +72,7 @@ def make_cache(tmp_path):
             "num_frames": int(num_frames),
             "has_ir": bool(data["has_ir"]),
             "fps": 20.0,
+            "person_found_fraction": 1.0,
             "source_rgb": data["source_rgb"],
             "source_ir": data["source_ir"],
             "dtype": "float32",

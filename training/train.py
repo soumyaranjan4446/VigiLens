@@ -156,7 +156,8 @@ def train_epoch_cached(model,
                        aux_optimizer: Optional[torch.optim.Optimizer] = None,
                        rec_weight: float = 1.0,
                        var_weight: float = 1.0,
-                       align_weight: float = 0.5) -> float:
+                       align_weight: float = 0.5,
+                       input_noise: float = 0.0) -> float:
     """Train one epoch on cached feature sequences."""
     model.train()
     model.fusion.train()
@@ -188,7 +189,10 @@ def train_epoch_cached(model,
             # When fusion is anchored by reconstruction/variance, isolate the
             # temporal predictor so it cannot smooth out intra-clip motion.
             temporal_seq = fused.detach() if (rec_weight > 0 or var_weight > 0) else fused
-            predictions, _ = model.temporal.forward_sequence(temporal_seq[:, :-1])
+            lstm_in = temporal_seq[:, :-1]
+            if input_noise > 0.0:
+                lstm_in = lstm_in + torch.randn_like(lstm_in) * input_noise
+            predictions, _ = model.temporal.forward_sequence(lstm_in)
             targets = fused[:, 1:].detach()
             loss_pred = F.smooth_l1_loss(predictions, targets)
             loss_rec, loss_var, loss_align = _anti_collapse_losses(
@@ -241,7 +245,7 @@ def train_cached(model,
                  epochs: int = 30,
                  batch_size: int = 8,
                  learning_rate: float = 1e-4,
-                 weight_decay: float = 1e-5,
+                 weight_decay: float = 1e-2,
                  grad_clip: float = 1.0,
                  amp: bool = True,
                  checkpoint_dir: Union[str, Path] = "checkpoints",
@@ -253,8 +257,16 @@ def train_cached(model,
                  val_batch_size: Optional[int] = None,
                  rec_weight: float = 1.0,
                  var_weight: float = 1.0,
-                 align_weight: float = 0.5) -> Dict:
+                 align_weight: float = 0.5,
+                 input_noise: float = 0.0,
+                 select_metric: str = "val_ratio",
+                 patience: Optional[int] = None,
+                 freeze_fusion_epoch: Optional[int] = None) -> Dict:
     """Train fusion + temporal model on cached features."""
+    select_metric = select_metric.lower()
+    if select_metric not in {"val_ratio", "val_loss"}:
+        raise ValueError(f"select_metric must be 'val_ratio' or 'val_loss', got '{select_metric}'")
+
     seed_everything(seed)
     checkpoint_dir = Path(checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -301,6 +313,8 @@ def train_cached(model,
 
     start_epoch = 1
     best_val_loss = float("inf")
+    best_metric = float("inf")
+    epochs_without_improvement = 0
     history: List[Dict] = []
 
     if resume is not None and Path(resume).exists():
@@ -324,6 +338,7 @@ def train_cached(model,
         start_epoch = int(checkpoint.get("epoch", 0)) + 1
         best_val_loss = float(checkpoint.get("loss", float("inf")))
         extra = checkpoint.get("extra", {}) or {}
+        best_metric = float(extra.get("best_metric", best_val_loss if select_metric == "val_loss" else float("inf")))
         history = list(extra.get("history", []))
 
     logger.info(
@@ -332,13 +347,30 @@ def train_cached(model,
     )
     logger.info("Trainable parameters: %d", sum(p.numel() for p in trainable))
 
+    current_rec_weight = rec_weight
+    current_var_weight = var_weight
+    current_align_weight = align_weight
+
     for epoch in range(start_epoch, epochs + 1):
+        if freeze_fusion_epoch is not None and epoch > freeze_fusion_epoch:
+            if any(p.requires_grad for p in model.fusion.parameters()):
+                logger.info(
+                    "Freezing fusion module at epoch %d; disabling rec/var/align auxiliary losses",
+                    epoch,
+                )
+                for p in model.fusion.parameters():
+                    p.requires_grad = False
+                model.fusion.eval()
+            current_rec_weight = 0.0
+            current_var_weight = 0.0
+            current_align_weight = 0.0
+
         train_loss = train_epoch_cached(
             model, train_loader, optimizer, device, amp=amp, grad_clip=grad_clip,
             scaler=scaler, limit_batches=limit_batches, epoch=epoch,
             aux_decoders=aux_decoders, aux_optimizer=aux_optimizer,
-            rec_weight=rec_weight, var_weight=var_weight,
-            align_weight=align_weight,
+            rec_weight=current_rec_weight, var_weight=current_var_weight,
+            align_weight=current_align_weight, input_noise=input_noise,
         )
         val_result = validate_cached(
             model,
@@ -350,18 +382,25 @@ def train_cached(model,
             amp=amp,
         )
         val_loss = float(val_result["val_loss"])
-        scheduler.step(val_loss)
+        val_ratio = float(val_result.get("val_ratio", float("nan")))
+        persistence_mse = float(val_result.get("persistence_mse", float("nan")))
+
+        current_metric = val_ratio if select_metric == "val_ratio" else val_loss
+        if math.isfinite(current_metric):
+            scheduler.step(current_metric)
 
         entry = {
             "epoch": epoch,
             "train_loss": train_loss,
             "val_loss": val_loss,
+            "val_ratio": val_ratio,
+            "persistence_mse": persistence_mse,
             "lr": optimizer.param_groups[0]["lr"],
         }
         history.append(entry)
         logger.info(
-            "Epoch %d/%d: train=%.6f val=%.6f lr=%.2e",
-            epoch, epochs, train_loss, val_loss, entry["lr"],
+            "Epoch %d/%d: train=%.6f val=%.6f val_ratio=%.6f lr=%.2e",
+            epoch, epochs, train_loss, val_loss, val_ratio, entry["lr"],
         )
 
         extra = {
@@ -369,34 +408,51 @@ def train_cached(model,
             "scheduler_state_dict": scheduler.state_dict(),
             "num_train_sequences": len(train_dataset),
             "num_val_sequences": len(val_dataset),
+            "select_metric": select_metric,
+            "best_metric": best_metric,
         }
         model.save_checkpoint(
             str(last_path), epoch, val_loss, config_dict or {},
             optimizer_state=optimizer.state_dict(), extra=extra,
         )
-        if math.isfinite(val_loss) and val_loss < best_val_loss:
+        if math.isfinite(current_metric) and current_metric < best_metric:
+            best_metric = current_metric
             best_val_loss = val_loss
+            epochs_without_improvement = 0
+            extra["best_metric"] = best_metric
             model.save_checkpoint(
                 str(best_path), epoch, val_loss, config_dict or {},
                 optimizer_state=optimizer.state_dict(), extra=extra,
             )
-            logger.info("New best checkpoint (val_loss=%.6f)", val_loss)
+            logger.info("New best checkpoint (%s=%.6f, val_loss=%.6f)", select_metric, best_metric, val_loss)
+        else:
+            epochs_without_improvement += 1
 
         with open(checkpoint_dir / "training_history.json", "w", encoding="utf-8") as handle:
             json.dump(history, handle, indent=2)
+
+        if patience is not None and patience > 0 and epochs_without_improvement >= patience:
+            logger.info(
+                "Early stopping triggered at epoch %d after %d epochs without improvement on %s",
+                epoch, patience, select_metric,
+            )
+            break
 
     if not best_path.exists():
         # A completely non-finite validation loss should still leave a usable
         # checkpoint for inspection.
         model.save_checkpoint(
             str(best_path), epochs, best_val_loss, config_dict or {},
-            optimizer_state=optimizer.state_dict(), extra={"history": history},
+            optimizer_state=optimizer.state_dict(),
+            extra={"history": history, "best_metric": best_metric, "select_metric": select_metric},
         )
 
     return {
         "best_checkpoint": str(best_path),
         "last_checkpoint": str(last_path),
         "best_val_loss": best_val_loss,
+        "best_metric": best_metric,
+        "select_metric": select_metric,
         "history": history,
     }
 
@@ -747,7 +803,7 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--val-batch-size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=1e-4)
-    parser.add_argument("--weight-decay", type=float, default=1e-5)
+    parser.add_argument("--weight-decay", type=float, default=1e-2)
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--seq-len", type=int, default=16)
     parser.add_argument("--seq-stride", type=int, default=1)
@@ -770,6 +826,14 @@ def main() -> None:
                         help="Variance regularization weight preventing fusion collapse")
     parser.add_argument("--align-weight", type=float, default=0.5,
                         help="Cross-modal alignment weight keeping RGB-only/IR-only aligned to RGB+IR")
+    parser.add_argument("--input-noise", type=float, default=0.0,
+                        help="Gaussian noise std added to LSTM inputs during training")
+    parser.add_argument("--select-metric", choices=["val_ratio", "val_loss"], default="val_ratio",
+                        help="Metric used for model selection, LR scheduling, and early stopping")
+    parser.add_argument("--patience", type=int, default=None,
+                        help="Early stopping patience (epochs without improvement)")
+    parser.add_argument("--freeze-fusion-epoch", type=int, default=None,
+                        help="Freeze fusion and disable auxiliary decoders/losses after this epoch")
     parser.add_argument("--calibrate", action="store_true", help="Calibrate after training")
     args = parser.parse_args()
 
@@ -856,6 +920,10 @@ def main() -> None:
             limit_batches=args.limit_batches, val_batch_size=args.val_batch_size,
             rec_weight=args.rec_weight, var_weight=args.var_weight,
             align_weight=args.align_weight,
+            input_noise=args.input_noise,
+            select_metric=args.select_metric,
+            patience=args.patience,
+            freeze_fusion_epoch=args.freeze_fusion_epoch,
         )
 
     print(json.dumps(result, indent=2))

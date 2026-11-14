@@ -72,6 +72,7 @@ def validate_cached(model,
     total_loss = 0.0
     num_batches = 0
     all_errors: List[np.ndarray] = []
+    all_persist_errors: List[np.ndarray] = []
 
     with torch.inference_mode():
         for batch_index, batch in enumerate(tqdm(loader, desc="Validating", leave=False)):
@@ -95,12 +96,23 @@ def validate_cached(model,
             num_batches += 1
 
             errors = F.mse_loss(predictions, targets, reduction="none").mean(dim=-1)
+            persist_errors = F.mse_loss(fused[:, :-1], targets, reduction="none").mean(dim=-1)
             all_errors.append(errors.detach().cpu().numpy().reshape(-1))
+            all_persist_errors.append(persist_errors.detach().cpu().numpy().reshape(-1))
 
     errors = np.concatenate(all_errors) if all_errors else np.zeros((0,), dtype=np.float32)
+    persist_errors = np.concatenate(all_persist_errors) if all_persist_errors else np.zeros((0,), dtype=np.float32)
+    sum_pred_mse = float(np.sum(errors))
+    sum_persist_mse = float(np.sum(persist_errors))
+    val_ratio = float(sum_pred_mse / max(sum_persist_mse, 1e-12)) if sum_persist_mse > 0 else float("nan")
+    persistence_mse = float(np.mean(persist_errors)) if persist_errors.size else float("nan")
+
     return {
         "val_loss": total_loss / num_batches if num_batches else float("nan"),
+        "val_ratio": val_ratio,
+        "persistence_mse": persistence_mse,
         "errors": errors.astype(np.float32),
+        "persistence_errors": persist_errors.astype(np.float32),
         "num_frames": int(errors.size),
         "num_batches": num_batches,
         "smoothing_window": smoothing_window,
@@ -157,6 +169,8 @@ def main() -> None:
 
     summary = {
         "val_loss": result["val_loss"],
+        "val_ratio": result.get("val_ratio"),
+        "persistence_mse": result.get("persistence_mse"),
         "num_frames": result["num_frames"],
         "num_batches": result["num_batches"],
         "mean_error": float(np.mean(result["errors"])) if result["errors"].size else None,
