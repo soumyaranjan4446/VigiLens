@@ -85,22 +85,31 @@ def _resize_mask(mask: Optional[np.ndarray], size: Tuple[int, int]) -> Optional[
 
 
 class ResNet50FeatureExtractor(nn.Module):
-    """ResNet50 feature extractor with ImageNet-pretrained weights."""
+    """ResNet50 feature extractor with ImageNet-pretrained or custom weights."""
 
-    def __init__(self, device: str = "cuda"):
+    def __init__(self, device: str = "cuda", weights_path: Optional[str] = None):
         super().__init__()
 
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
 
         # Load pretrained ResNet50 and remove the classification layer.
-        backbone = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+        from pathlib import Path
+        if weights_path is not None and Path(weights_path).exists():
+            backbone = models.resnet50(weights=None)
+            state = torch.load(weights_path, map_location="cpu", weights_only=False, encoding="latin1")
+            sd = state.get("state_dict", state.get("net", state))
+            sd = {k.replace("module.", ""): v for k, v in sd.items()}
+            backbone.load_state_dict(sd, strict=False)
+            logger.info(f"Loaded custom weights from {weights_path} onto {self.device}")
+        else:
+            backbone = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V1)
+            logger.info(f"ResNet50 feature extractor loaded on {self.device}")
+
         self.backbone = nn.Sequential(*list(backbone.children())[:-1])
         self.backbone.eval()
         self.backbone.to(self.device)
 
         self.feature_dim = 2048
-
-        logger.info(f"ResNet50 feature extractor loaded on {self.device}")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Extract features from a normalized (B, 3, H, W) tensor."""
@@ -132,11 +141,12 @@ class _BaseFeatureExtractor:
     def __init__(self,
                  device: str = "cuda",
                  input_size: Tuple[int, int] = (224, 224),
-                 use_amp: bool = True):
+                 use_amp: bool = True,
+                 weights_path: Optional[str] = None):
         self.device = device
         self.input_size = tuple(input_size)
         self.use_amp = bool(use_amp and torch.cuda.is_available() and str(device).startswith("cuda"))
-        self.extractor = ResNet50FeatureExtractor(device)
+        self.extractor = ResNet50FeatureExtractor(device, weights_path=weights_path)
 
     def train(self, mode: bool = True):
         """Put the underlying encoder in training mode (for stage-2 tuning)."""

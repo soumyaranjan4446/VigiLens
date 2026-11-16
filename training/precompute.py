@@ -425,12 +425,12 @@ def precompute_data_dir(data_dir: Union[str, Path],
     return cache_paths
 
 
-def build_extractors(device: str, use_amp: bool = True):
+def build_extractors(device: str, use_amp: bool = True, weights_path: Optional[str] = None):
     from models.feature_extractor import IRFeatureExtractor, RGBFeatureExtractor
 
     return (
-        RGBFeatureExtractor(device=device, use_amp=use_amp),
-        IRFeatureExtractor(device=device, use_amp=use_amp),
+        RGBFeatureExtractor(device=device, use_amp=use_amp, weights_path=weights_path),
+        IRFeatureExtractor(device=device, use_amp=use_amp, weights_path=weights_path),
     )
 
 
@@ -450,6 +450,7 @@ def main() -> None:
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--no-segmentation", action="store_true", help="Use full frames (no YOLO)")
     parser.add_argument("--no-amp", action="store_true")
+    parser.add_argument("--weights-path", default=None, help="Path to custom Re-ID weights")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -460,7 +461,7 @@ def main() -> None:
 
         segmentation = YOLOSegmentation(device=args.device)
 
-    rgb_extractor, ir_extractor = build_extractors(args.device, use_amp=not args.no_amp)
+    rgb_extractor, ir_extractor = build_extractors(args.device, use_amp=not args.no_amp, weights_path=args.weights_path)
 
     if args.manifest:
         paths = precompute_manifest(
