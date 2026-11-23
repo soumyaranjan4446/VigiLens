@@ -54,6 +54,10 @@ class InferencePipeline:
         self.threshold = float(threshold if threshold is not None else calibrated)
         self.default_threshold = float(calibrated)
 
+        self.score_variant = self.calibration_info.get("score_variant", "mse")
+        diag_var = self.calibration_info.get("diag_variance")
+        self.diag_variance = np.asarray(diag_var, dtype=np.float32) if diag_var is not None else None
+
         self.score_history: deque = deque(maxlen=self.smoothing_window)
         self.ema_score: Optional[float] = None
         self.frame_count = 0
@@ -115,14 +119,26 @@ class InferencePipeline:
         else:
             ir_mask = None
 
-        result = self.model.process_frame(
-            rgb_frame,
-            ir_frame,
-            rgb_mask,
-            ir_mask,
-            rgb_available,
-            ir_available,
-        )
+        try:
+            result = self.model.process_frame(
+                rgb_frame,
+                ir_frame,
+                rgb_mask,
+                ir_mask,
+                rgb_available,
+                ir_available,
+                score_variant=self.score_variant,
+                diag_variance=self.diag_variance,
+            )
+        except TypeError:
+            result = self.model.process_frame(
+                rgb_frame,
+                ir_frame,
+                rgb_mask,
+                ir_mask,
+                rgb_available,
+                ir_available,
+            )
 
         actual_rgb = bool(result.get("rgb_available", rgb_available))
         actual_ir = bool(result.get("ir_available", ir_available))

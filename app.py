@@ -110,6 +110,13 @@ st.sidebar.subheader("Temporal Smoothing")
 smoothing_method = st.sidebar.selectbox("Smoothing Method", ["moving_average", "exponential"])
 window_size = st.sidebar.slider("Window Size", 1, 30, config.inference.smoothing_window)
 
+st.sidebar.subheader("Anomaly Threshold & Sensitivity")
+override_thresh = st.sidebar.checkbox("Manual Sensitivity Override", value=False, help="Enable to manually tune the decision threshold for custom videos")
+if override_thresh:
+    manual_thresh = st.sidebar.slider("Custom Threshold", min_value=0.01, max_value=5.0, value=0.20, step=0.01)
+else:
+    manual_thresh = None
+
 st.sidebar.subheader("Display")
 show_ir = st.sidebar.checkbox("Show IR Frame", value=True)
 show_mask = st.sidebar.checkbox("Show Segmentation Mask", value=False)
@@ -172,6 +179,7 @@ if visible_file:
                 calibration_info=calibration_info,
                 smoothing_window=window_size,
                 smoothing_method=smoothing_method,
+                threshold=manual_thresh,
             )
             frame_source = create_frame_source(
                 str(visible_temp_path), str(ir_temp_path) if ir_temp_path else None

@@ -13,7 +13,7 @@ Detects anomalies via prediction error.
 
 import logging
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -178,7 +178,9 @@ class VigiLensModel(nn.Module):
                       rgb_mask=None,
                       ir_mask=None,
                       rgb_available: bool = True,
-                      ir_available: bool = True) -> Dict:
+                      ir_available: bool = True,
+                      score_variant: str = "mse",
+                      diag_variance: Optional[Union[np.ndarray, torch.Tensor]] = None) -> Dict:
         """
         Process one frame for streaming inference.
 
@@ -208,8 +210,15 @@ class VigiLensModel(nn.Module):
 
             anomaly_score = None
             if self.previous_prediction is not None:
-                error = F.mse_loss(self.previous_prediction, fused, reduction="none")
-                anomaly_score = error.mean().item()
+                diff_sq = (self.previous_prediction - fused).pow(2)
+                if score_variant == "norm_mse" and diag_variance is not None:
+                    if not isinstance(diag_variance, torch.Tensor):
+                        diag_var_t = torch.tensor(diag_variance, dtype=torch.float32, device=fused.device)
+                    else:
+                        diag_var_t = diag_variance.to(device=fused.device, dtype=torch.float32)
+                    anomaly_score = (diff_sq / (diag_var_t + 1e-4)).mean().item()
+                else:
+                    anomaly_score = diff_sq.mean().item()
 
             prediction, (h, c) = self.forward(fused, self.hidden_state)
 
